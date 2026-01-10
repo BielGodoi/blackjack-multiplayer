@@ -2,7 +2,6 @@
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
-const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -17,11 +16,11 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.static('public'));
 
+// Banco de dados simples em memória
 const users = new Map();
+const dailyBonuses = new Map();
 
-// Sistema de bônus diários
-const dailyBonuses = new Map(); // username -> { lastBonus: timestamp, bonusesToday: number }
-
+// Estado do jogo
 let gameState = {
   players: [],
   dealer: { cards: [], total: 0 },
@@ -31,10 +30,11 @@ let gameState = {
   currentPlayer: 0,
   status: 'lobby',
   roundSpeed: 2000,
-  bettingTimer: null,
-  bettingTimeLeft: 0
+  bettingTimeLeft: 0,
+  bettingTimer: null
 };
 
+// Criar 6 baralhos
 function createDeck() {
   const suits = ['hearts', 'diamonds', 'clubs', 'spades'];
   const values = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
@@ -91,13 +91,26 @@ function canSplit(player) {
   return false;
 }
 
+// Salvar saldo do usuário
+function saveUserBalance(username, balance) {
+  if (users.has(username)) {
+    const user = users.get(username);
+    user.balance = balance;
+    users.set(username, user);
+    console.log(`💾 Salvou saldo de ${username}: $${balance}`);
+  }
+}
+
 io.on('connection', (socket) => {
-  console.log('Novo jogador conectado:', socket.id);
+  console.log('✅ Novo jogador conectado:', socket.id);
   
   socket.emit('gameState', gameState);
   
+  // Login
   socket.on('login', (data) => {
     const { username, password } = data;
+    
+    console.log(`🔐 Tentativa de login: ${username}`);
     
     if (!username || !password) {
       socket.emit('loginError', { message: 'Usuário e senha são obrigatórios!' });
@@ -107,17 +120,20 @@ io.on('connection', (socket) => {
     if (users.has(username)) {
       const user = users.get(username);
       if (user.password === password) {
+        console.log(`✅ Login bem-sucedido: ${username}, Saldo: $${user.balance}`);
         socket.emit('loginSuccess', { username, balance: user.balance });
       } else {
+        console.log(`❌ Senha incorreta para: ${username}`);
         socket.emit('loginError', { message: 'Senha incorreta!' });
       }
     } else {
+      console.log(`🆕 Novo usuário criado: ${username} com $1000`);
       users.set(username, { password, balance: 1000 });
       socket.emit('loginSuccess', { username, balance: 1000 });
     }
   });
   
-  // Sistema de bônus diário
+  // Bônus diário
   socket.on('claimDailyBonus', (data) => {
     const { username } = data;
     const user = users.get(username);
@@ -128,11 +144,10 @@ io.on('connection', (socket) => {
     }
     
     const now = Date.now();
-    const oneDay = 24 * 60 * 60 * 1000; // 24 horas em milissegundos
+    const oneDay = 24 * 60 * 60 * 1000;
     
     let bonusData = dailyBonuses.get(username) || { lastBonus: 0, bonusesToday: 0 };
     
-    // Verificar se passou 24h desde o último bônus
     if (now - bonusData.lastBonus < oneDay) {
       const timeLeft = oneDay - (now - bonusData.lastBonus);
       const hoursLeft = Math.floor(timeLeft / (60 * 60 * 1000));
@@ -141,18 +156,15 @@ io.on('connection', (socket) => {
       return;
     }
     
-    // Resetar contador diário se passou mais de 24h
     if (now - bonusData.lastBonus >= oneDay) {
       bonusData.bonusesToday = 0;
     }
     
-    // Limitar a 3 bônus por dia
     if (bonusData.bonusesToday >= 3) {
-      socket.emit('bonusError', { message: 'Você já resgatou 3 bônus hoje! Volte amanhã!' });
+      socket.emit('bonusError', { message: 'Você já resgatou 3 bônus hoje!' });
       return;
     }
     
-    // Dar o bônus
     const bonusAmount = 500;
     user.balance += bonusAmount;
     bonusData.lastBonus = now;
@@ -167,11 +179,19 @@ io.on('connection', (socket) => {
       remaining: 3 - bonusData.bonusesToday
     });
     
-    io.emit('notification', { message: `${username} ganhou ${bonusAmount} de bônus!` });
+    // Atualizar saldo do jogador na mesa
+    const player = gameState.players.find(p => p.username === username);
+    if (player) {
+      player.balance = user.balance;
+      io.emit('gameState', gameState);
+    }
+    
+    console.log(`🎁 ${username} ganhou $${bonusAmount}. Novo saldo: $${user.balance}`);
   });
   
+  // Adicionar jogador
   socket.on('addPlayer', (data) => {
-    if (gameState.players.length < 7) {
+    if (gameState.players.length < 7 && gameState.status === 'lobby') {
       const user = users.get(data.username);
       const balance = user ? user.balance : 1000;
       
@@ -201,19 +221,23 @@ io.on('connection', (socket) => {
       gameState.players.push(player);
       io.emit('gameState', gameState);
       io.emit('notification', { message: `${data.name} entrou na mesa!` });
+      console.log(`👤 ${data.name} (${data.username}) entrou na mesa com $${balance}`);
     }
   });
   
+  // Iniciar fase de apostas
   socket.on('startBetting', () => {
-    if (gameState.players.length > 0) {
+    if (gameState.players.length > 0 && gameState.status === 'lobby') {
       if (gameState.deck.length === 0 || needsShuffle()) {
         gameState.deck = createDeck();
         gameState.cardsUsed = 0;
-        io.emit('notification', { message: '🔀 Baralhos embaralhados! (6 baralhos)' });
+        io.emit('notification', { message: '🔀 Baralhos embaralhados!' });
       }
       
       gameState.status = 'betting';
-      gameState.bettingTimeLeft = 30; // 30 segundos para apostar
+      gameState.bettingTimeLeft = 30;
+      
+      // Resetar apostas
       gameState.players.forEach(p => {
         p.bet = 0;
         p.betPlaced = false;
@@ -230,8 +254,11 @@ io.on('connection', (socket) => {
         p.canDouble = false;
         p.playingFirstHand = true;
       });
+      
       io.emit('gameState', gameState);
-      io.emit('notification', { message: '💰 30 segundos para apostar! Clique nas fichas!' });
+      io.emit('notification', { message: '💰 30 segundos para apostar!' });
+      
+      console.log('🎲 Fase de apostas iniciada');
       
       // Timer de apostas
       if (gameState.bettingTimer) {
@@ -245,13 +272,21 @@ io.on('connection', (socket) => {
         if (gameState.bettingTimeLeft <= 0) {
           clearInterval(gameState.bettingTimer);
           
-          // Remover jogadores que não apostaram
           const playersWhoBet = gameState.players.filter(p => p.betPlaced);
           const playersWhoDidnt = gameState.players.filter(p => !p.betPlaced);
           
+          // Devolver apostas não confirmadas
+          playersWhoDidnt.forEach(p => {
+            if (p.bet > 0) {
+              p.balance += p.bet;
+              saveUserBalance(p.username, p.balance);
+              p.bet = 0;
+            }
+          });
+          
           if (playersWhoDidnt.length > 0) {
             io.emit('notification', { 
-              message: `${playersWhoDidnt.map(p => p.name).join(', ')} não apostaram e ficaram de fora!` 
+              message: `${playersWhoDidnt.map(p => p.name).join(', ')} não confirmaram!` 
             });
           }
           
@@ -269,24 +304,69 @@ io.on('connection', (socket) => {
     }
   });
   
+  // Fazer aposta
   socket.on('placeBet', (data) => {
     const player = gameState.players.find(p => p.id === socket.id);
     
     if (player && gameState.status === 'betting' && !player.betPlaced) {
       const betAmount = parseInt(data.amount);
       
-      if (betAmount >= 5 && betAmount <= player.balance) {
-        player.bet = betAmount;
-        player.balance -= betAmount; // DESCONTA O SALDO IMEDIATAMENTE
-        player.betPlaced = true;
-        io.emit('gameState', gameState);
-        io.emit('notification', { message: `${player.name} apostou ${betAmount}` });
-        
-        const allBetsPlaced = gameState.players.every(p => p.betPlaced);
-        if (allBetsPlaced) {
-          setTimeout(() => startGame(), gameState.roundSpeed);
-        }
+      console.log(`💵 ${player.name} clicou na ficha de $${betAmount}`);
+      
+      if (betAmount < 5) {
+        socket.emit('betError', { message: 'Aposta mínima: $5' });
+        return;
       }
+      if (betAmount > 500) {
+        socket.emit('betError', { message: 'Aposta máxima: $500' });
+        return;
+      }
+      if (betAmount > player.balance) {
+        socket.emit('betError', { message: 'Saldo insuficiente!' });
+        return;
+      }
+      if (player.bet + betAmount > 500) {
+        socket.emit('betError', { message: 'Aposta total máxima: $500' });
+        return;
+      }
+      
+      player.bet += betAmount;
+      player.balance -= betAmount;
+      
+      console.log(`✅ ${player.name} apostou $${betAmount}. Total: $${player.bet}, Saldo: $${player.balance}`);
+      
+      io.emit('gameState', gameState);
+      socket.emit('notification', { message: `Você apostou $${betAmount}!` });
+    }
+  });
+  
+  // Confirmar aposta
+  socket.on('confirmBet', () => {
+    const player = gameState.players.find(p => p.id === socket.id);
+    
+    if (player && gameState.status === 'betting' && !player.betPlaced) {
+      if (player.bet < 5) {
+        socket.emit('betError', { message: 'Aposta mínima: $5' });
+        return;
+      }
+      
+      player.betPlaced = true;
+      saveUserBalance(player.username, player.balance);
+      io.emit('gameState', gameState);
+      io.emit('notification', { message: `✅ ${player.name} confirmou $${player.bet}!` });
+      console.log(`✅ ${player.name} confirmou aposta de $${player.bet}`);
+    }
+  });
+  
+  // Limpar aposta
+  socket.on('clearBet', () => {
+    const player = gameState.players.find(p => p.id === socket.id);
+    
+    if (player && gameState.status === 'betting' && !player.betPlaced) {
+      player.balance += player.bet;
+      player.bet = 0;
+      io.emit('gameState', gameState);
+      console.log(`🗑️ ${player.name} limpou a aposta`);
     }
   });
   
@@ -295,6 +375,8 @@ io.on('connection', (socket) => {
     
     gameState.status = 'playing';
     gameState.currentPlayer = 0;
+    
+    console.log('🎴 Distribuindo cartas...');
     
     gameState.players = gameState.players.map(p => {
       const card1 = gameState.deck.pop();
@@ -341,10 +423,6 @@ io.on('connection', (socket) => {
     io.emit('gameState', gameState);
     io.emit('notification', { message: '🎴 Cartas distribuídas!' });
     
-    if (needsShuffle()) {
-      io.emit('notification', { message: '⚠️ Próxima rodada: Baralhos serão embaralhados!' });
-    }
-    
     setTimeout(() => skipBlackjackPlayers(), 500);
   }
   
@@ -360,6 +438,8 @@ io.on('connection', (socket) => {
       io.emit('gameState', gameState);
     }
   }
+  
+  // Split, Double, Hit, Stand (continuando na próxima mensagem devido ao limite de caracteres...)
   
   socket.on('split', () => {
     const currentPlayer = gameState.players[gameState.currentPlayer];
@@ -380,13 +460,14 @@ io.on('connection', (socket) => {
       currentPlayer.splitTotal = calculateTotal(currentPlayer.splitHand.cards);
       
       currentPlayer.balance -= currentPlayer.bet;
+      saveUserBalance(currentPlayer.username, currentPlayer.balance);
       
       currentPlayer.canSplit = false;
       currentPlayer.canDouble = false;
       currentPlayer.playingFirstHand = true;
       
       io.emit('gameState', gameState);
-      io.emit('notification', { message: `${currentPlayer.name} dividiu! Jogando MÃO 1...` });
+      io.emit('notification', { message: `${currentPlayer.name} dividiu!` });
     }
   });
   
@@ -399,6 +480,7 @@ io.on('connection', (socket) => {
       currentPlayer.balance -= currentPlayer.bet;
       currentPlayer.bet *= 2;
       currentPlayer.doubled = true;
+      saveUserBalance(currentPlayer.username, currentPlayer.balance);
       
       const newCard = gameState.deck.pop();
       gameState.cardsUsed++;
@@ -414,7 +496,7 @@ io.on('connection', (socket) => {
       currentPlayer.canDouble = false;
       
       io.emit('gameState', gameState);
-      io.emit('notification', { message: `${currentPlayer.name} dobrou a aposta!` });
+      io.emit('notification', { message: `${currentPlayer.name} dobrou!` });
       
       setTimeout(() => nextPlayer(), gameState.roundSpeed);
     }
@@ -428,7 +510,6 @@ io.on('connection', (socket) => {
       gameState.cardsUsed++;
       
       if (currentPlayer.splitHand && currentPlayer.playingFirstHand) {
-        // Jogando primeira mão do split
         currentPlayer.cards.push(newCard);
         currentPlayer.total = calculateTotal(currentPlayer.cards);
         currentPlayer.canDouble = false;
@@ -438,13 +519,12 @@ io.on('connection', (socket) => {
           currentPlayer.busted = true;
           currentPlayer.playingFirstHand = false;
           io.emit('gameState', gameState);
-          io.emit('notification', { message: `MÃO 1 estourou! Jogando MÃO 2...` });
+          io.emit('notification', { message: `MÃO 1 estourou!` });
           setTimeout(() => io.emit('gameState', gameState), 1000);
         } else {
           io.emit('gameState', gameState);
         }
       } else if (currentPlayer.splitHand && !currentPlayer.playingFirstHand) {
-        // Jogando segunda mão do split
         currentPlayer.splitHand.cards.push(newCard);
         currentPlayer.splitTotal = calculateTotal(currentPlayer.splitHand.cards);
         
@@ -456,7 +536,6 @@ io.on('connection', (socket) => {
           io.emit('gameState', gameState);
         }
       } else {
-        // Sem split - jogo normal
         currentPlayer.cards.push(newCard);
         currentPlayer.total = calculateTotal(currentPlayer.cards);
         currentPlayer.canDouble = false;
@@ -478,18 +557,15 @@ io.on('connection', (socket) => {
     
     if (currentPlayer && currentPlayer.id === socket.id) {
       if (currentPlayer.splitHand && currentPlayer.playingFirstHand) {
-        // Parar primeira mão, ir para segunda
         currentPlayer.playingFirstHand = false;
         io.emit('gameState', gameState);
-        io.emit('notification', { message: `MÃO 1 parada! Jogando MÃO 2...` });
+        io.emit('notification', { message: `Jogando MÃO 2...` });
       } else if (currentPlayer.splitHand && !currentPlayer.playingFirstHand) {
-        // Parar segunda mão
         currentPlayer.splitStanding = true;
         currentPlayer.standing = true;
         io.emit('gameState', gameState);
         setTimeout(() => nextPlayer(), gameState.roundSpeed * 0.5);
       } else {
-        // Sem split
         currentPlayer.standing = true;
         io.emit('gameState', gameState);
         setTimeout(() => nextPlayer(), gameState.roundSpeed * 0.5);
@@ -540,27 +616,29 @@ io.on('connection', (socket) => {
   function determineWinners() {
     const dealerTotal = gameState.dealer.total;
     
+    console.log('🏆 Determinando vencedores...');
+    
     gameState.players = gameState.players.map(p => {
       let newBalance = p.balance;
       let result = '';
       
-      // Avaliar primeira mão
+      // Primeira mão
       let firstHandWin = 0;
       if (p.busted) {
-        firstHandWin = 0; // Já perdeu a aposta (foi descontada antes)
+        firstHandWin = 0;
       } else if (p.blackjack && dealerTotal !== 21) {
-        firstHandWin = p.bet + Math.floor(p.bet * 1.5); // Devolve aposta + ganho
+        firstHandWin = p.bet + Math.floor(p.bet * 1.5);
       } else if (dealerTotal > 21) {
-        firstHandWin = p.bet * 2; // Devolve aposta + ganho igual
+        firstHandWin = p.bet * 2;
       } else if (p.total > dealerTotal) {
-        firstHandWin = p.bet * 2; // Devolve aposta + ganho igual
+        firstHandWin = p.bet * 2;
       } else if (p.total === dealerTotal) {
-        firstHandWin = p.bet; // Só devolve a aposta (empate)
+        firstHandWin = p.bet;
       } else {
-        firstHandWin = 0; // Perdeu (aposta já foi descontada)
+        firstHandWin = 0;
       }
       
-      // Avaliar segunda mão (se tiver split)
+      // Segunda mão (split)
       let secondHandWin = 0;
       if (p.splitHand) {
         if (p.splitBusted) {
@@ -579,29 +657,26 @@ io.on('connection', (socket) => {
       const totalWin = firstHandWin + secondHandWin;
       newBalance += totalWin;
       
-      // Calcular lucro líquido para exibição
       const betTotal = p.splitHand ? p.bet * 2 : p.bet;
       const profit = totalWin - betTotal;
       
       if (p.splitHand) {
         const h1Profit = firstHandWin - p.bet;
         const h2Profit = secondHandWin - p.bet;
-        const h1 = h1Profit > 0 ? `M1:+${h1Profit}` : h1Profit === 0 ? 'M1:PERDEU' : `M1:PERDEU`;
-        const h2 = h2Profit > 0 ? `M2:+${h2Profit}` : h2Profit === 0 ? 'M2:PERDEU' : `M2:PERDEU`;
-        result = `${h1} | ${h2} | Total: ${profit >= 0 ? '+' : ''}${profit}`;
+        result = `M1: ${h1Profit >= 0 ? '+' : ''}$${h1Profit} | M2: ${h2Profit >= 0 ? '+' : ''}$${h2Profit}`;
       } else {
         if (profit > 0) {
-          result = p.blackjack ? `BLACKJACK! +${profit}` : `GANHOU! +${profit}`;
+          result = p.blackjack ? `🎰 BLACKJACK! +$${profit}` : `✅ GANHOU +$${profit}`;
         } else if (profit === 0 && !p.busted) {
-          result = 'EMPATE $0';
+          result = `⚪ EMPATE (devolveu $${p.bet})`;
         } else {
-          result = `PERDEU -${betTotal}`;
+          result = `❌ PERDEU -$${betTotal}`;
         }
       }
       
-      if (users.has(p.username)) {
-        users.get(p.username).balance = newBalance;
-      }
+      saveUserBalance(p.username, newBalance);
+      
+      console.log(`${p.name}: ${result} (Saldo: $${newBalance})`);
       
       return { ...p, balance: newBalance, result };
     });
@@ -612,6 +687,7 @@ io.on('connection', (socket) => {
   
   socket.on('newRound', () => {
     if (gameState.status === 'finished') {
+      // Manter jogadores mas resetar dados da rodada
       gameState.players = gameState.players.map(p => ({
         ...p,
         bet: 0,
@@ -635,6 +711,7 @@ io.on('connection', (socket) => {
       gameState.dealer = { cards: [], total: 0 };
       gameState.currentPlayer = 0;
       gameState.status = 'betting';
+      gameState.bettingTimeLeft = 30;
       
       if (needsShuffle()) {
         gameState.deck = createDeck();
@@ -643,29 +720,61 @@ io.on('connection', (socket) => {
       }
       
       io.emit('gameState', gameState);
-      io.emit('notification', { message: '💰 Nova rodada! Façam suas apostas!' });
+      io.emit('notification', { message: '💰 Nova rodada! 30 segundos!' });
+      
+      // Reiniciar timer
+      if (gameState.bettingTimer) {
+        clearInterval(gameState.bettingTimer);
+      }
+      
+      gameState.bettingTimer = setInterval(() => {
+        gameState.bettingTimeLeft--;
+        io.emit('bettingTimer', { timeLeft: gameState.bettingTimeLeft });
+        
+        if (gameState.bettingTimeLeft <= 0) {
+          clearInterval(gameState.bettingTimer);
+          
+          const playersWhoBet = gameState.players.filter(p => p.betPlaced);
+          const playersWhoDidnt = gameState.players.filter(p => !p.betPlaced);
+          
+          playersWhoDidnt.forEach(p => {
+            if (p.bet > 0) {
+              p.balance += p.bet;
+              saveUserBalance(p.username, p.balance);
+              p.bet = 0;
+            }
+          });
+          
+          gameState.players = playersWhoBet;
+          
+          if (gameState.players.length > 0) {
+            setTimeout(() => startGame(), 2000);
+          } else {
+            gameState.status = 'lobby';
+            io.emit('gameState', gameState);
+          }
+        }
+      }, 1000);
     }
   });
   
   socket.on('leaveTable', () => {
     const player = gameState.players.find(p => p.id === socket.id);
     if (player) {
-      if (users.has(player.username)) {
-        users.get(player.username).balance = player.balance;
-      }
+      saveUserBalance(player.username, player.balance);
       gameState.players = gameState.players.filter(p => p.id !== socket.id);
       io.emit('gameState', gameState);
-      io.emit('notification', { message: `${player.name} saiu da mesa` });
+      io.emit('notification', { message: `${player.name} saiu` });
+      console.log(`🚪 ${player.name} saiu. Saldo salvo: $${player.balance}`);
     }
   });
   
   socket.on('disconnect', () => {
     const player = gameState.players.find(p => p.id === socket.id);
     if (player) {
-      if (users.has(player.username)) {
-        users.get(player.username).balance = player.balance;
-      }
+      saveUserBalance(player.username, player.balance);
       io.emit('notification', { message: `${player.name} desconectou` });
+      console.log(`❌ ${player.name} desconectou. Saldo salvo: $${player.balance}`);
     }
     gameState.players = gameState.players.filter(p => p.id !== socket.id);
     io.emit('gameState', gameState);
@@ -675,5 +784,5 @@ io.on('connection', (socket) => {
 server.listen(PORT, () => {
   console.log(`🎰 Servidor Blackjack rodando na porta ${PORT}`);
   console.log(`🌐 Acesse: http://localhost:${PORT}`);
-  console.log(`🃏 6 baralhos (312 cartas) - Reembaralha aos 50%`);
+  console.log(`🃏 6 baralhos (312 cartas)`);
 });
