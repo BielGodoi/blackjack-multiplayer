@@ -184,9 +184,10 @@ io.on('connection', (socket) => {
       
       if (betAmount >= 5 && betAmount <= player.balance) {
         player.bet = betAmount;
+        player.balance -= betAmount; // DESCONTA O SALDO IMEDIATAMENTE
         player.betPlaced = true;
         io.emit('gameState', gameState);
-        io.emit('notification', { message: `${player.name} apostou $${betAmount}` });
+        io.emit('notification', { message: `${player.name} apostou ${betAmount}` });
         
         const allBetsPlaced = gameState.players.every(p => p.betPlaced);
         if (allBetsPlaced) {
