@@ -161,6 +161,8 @@
 
     function renderPlayer(player, isActive) {
       const isMe = player.id === myId;
+      const playingHand = player.splitHand ? (player.playingFirstHand ? 'MÃO 1' : 'MÃO 2') : '';
+      
       return `
         <div class="p-4 rounded-2xl border-4 ${isActive ? 'bg-gradient-to-br from-green-900/60 to-green-800/60 border-green-400 shadow-2xl shadow-green-500/50' : 'bg-gradient-to-br from-gray-900/60 to-gray-800/60 border-gray-600'} backdrop-blur-md transition-all duration-300">
           <div class="flex justify-between items-center mb-3">
@@ -168,31 +170,45 @@
               <div class="w-4 h-4 rounded-full ${isActive ? 'bg-green-400 animate-pulse shadow-lg shadow-green-400' : 'bg-gray-600'}"></div>
               <span class="font-black text-white text-lg">${player.name} ${isMe ? '(VOCÊ)' : ''}</span>
               ${player.doubled ? '<span class="text-yellow-400 text-sm">⚡DOBROU</span>' : ''}
+              ${isActive && playingHand ? `<span class="text-green-400 text-sm animate-pulse">▶ ${playingHand}</span>` : ''}
             </div>
             <div class="text-right">
-              <div class="text-yellow-400 font-bold text-sm">Saldo: $${player.balance}</div>
+              <div class="text-yellow-400 font-bold text-sm">Saldo: ${player.balance}</div>
               ${player.bet > 0 ? renderChips(player.bet) : '<div class="text-gray-400 text-xs">Sem aposta</div>'}
             </div>
           </div>
           ${player.cards.length > 0 ? `
-            <div class="flex gap-3 mb-3 flex-wrap justify-center">
-              ${player.cards.map(card => renderCard(card)).join('')}
-            </div>
-            ${player.splitHand ? `
-              <div class="border-t-2 border-yellow-500 pt-2 mt-2">
-                <p class="text-yellow-300 text-xs text-center mb-2">Mão Dividida</p>
+            <div class="space-y-3">
+              <!-- Primeira Mão -->
+              <div class="p-3 bg-black/20 rounded-lg ${player.splitHand && player.playingFirstHand && isActive ? 'border-2 border-green-400' : ''}">
+                ${player.splitHand ? '<p class="text-yellow-300 text-xs text-center mb-2 font-bold">MÃO 1</p>' : ''}
                 <div class="flex gap-3 mb-2 flex-wrap justify-center">
-                  ${player.splitHand.cards.map(card => renderCard(card)).join('')}
+                  ${player.cards.map(card => renderCard(card)).join('')}
                 </div>
-                <div class="text-center text-white text-sm">Total: ${player.splitHand.total}</div>
+                <div class="text-center font-bold text-lg">
+                  ${!player.result && player.busted ? '<span class="text-red-400">ESTOUROU!</span>' : ''}
+                  ${!player.result && player.blackjack ? '<span class="text-yellow-400">BLACKJACK! 🎉</span>' : ''}
+                  ${!player.result && player.standing && !player.busted && !player.blackjack && !player.splitHand ? '<span class="text-blue-400">PAROU</span>' : ''}
+                  ${!player.result && !player.busted && !player.blackjack ? `<span class="text-white">Total: ${player.total}</span>` : ''}
+                </div>
               </div>
-            ` : ''}
-            <div class="text-center font-bold text-lg">
-              ${player.result ? `<div class="text-yellow-300 text-xl animate-pulse">${player.result}</div>` : ''}
-              ${!player.result && player.busted ? '<span class="text-red-400">ESTOUROU!</span>' : ''}
-              ${!player.result && player.blackjack ? '<span class="text-yellow-400">BLACKJACK! 🎉</span>' : ''}
-              ${!player.result && player.standing && !player.busted && !player.blackjack ? '<span class="text-blue-400">PAROU</span>' : ''}
-              ${!player.result && !player.busted && !player.standing && !player.blackjack ? `<span class="text-white">Total: ${player.total}</span>` : ''}
+              
+              <!-- Segunda Mão (Split) -->
+              ${player.splitHand ? `
+                <div class="p-3 bg-black/20 rounded-lg border-t-2 border-yellow-500 ${!player.playingFirstHand && isActive ? 'border-2 border-green-400' : ''}">
+                  <p class="text-yellow-300 text-xs text-center mb-2 font-bold">MÃO 2</p>
+                  <div class="flex gap-3 mb-2 flex-wrap justify-center">
+                    ${player.splitHand.cards.map(card => renderCard(card)).join('')}
+                  </div>
+                  <div class="text-center font-bold text-lg">
+                    ${!player.result && player.splitBusted ? '<span class="text-red-400">ESTOUROU!</span>' : ''}
+                    ${!player.result && player.splitStanding ? '<span class="text-blue-400">PAROU</span>' : ''}
+                    ${!player.result && !player.splitBusted && !player.splitStanding ? `<span class="text-white">Total: ${player.splitTotal}</span>` : ''}
+                  </div>
+                </div>
+              ` : ''}
+              
+              ${player.result ? `<div class="text-yellow-300 text-center font-bold animate-pulse mt-2">${player.result}</div>` : ''}
             </div>
           ` : `
             <div class="text-center text-gray-400 py-4">
