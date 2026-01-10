@@ -15,13 +15,10 @@ const io = socketIo(server, {
 
 const PORT = process.env.PORT || 3000;
 
-// Servir arquivos estáticos
 app.use(express.static('public'));
 
-// Banco de dados simples em memória (em produção, use MongoDB ou PostgreSQL)
-const users = new Map(); // username -> { password, balance }
+const users = new Map();
 
-// Estado do jogo
 let gameState = {
   players: [],
   dealer: { cards: [], total: 0 },
@@ -29,11 +26,10 @@ let gameState = {
   totalCards: 312,
   cardsUsed: 0,
   currentPlayer: 0,
-  status: 'lobby', // lobby, betting, playing, finished
-  roundSpeed: 2000 // Velocidade das animações (2 segundos)
+  status: 'lobby',
+  roundSpeed: 2000
 };
 
-// Criar 6 baralhos
 function createDeck() {
   const suits = ['hearts', 'diamonds', 'clubs', 'spades'];
   const values = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
@@ -77,16 +73,13 @@ function calculateTotal(cards) {
   return total;
 }
 
-// Verificar se pode dividir (split)
 function canSplit(player) {
   if (player.cards.length !== 2) return false;
   const card1 = player.cards[0].value;
   const card2 = player.cards[1].value;
   
-  // Verificar se são cartas do mesmo valor
   if (card1 === card2) return true;
   
-  // Verificar se ambas são figuras (J, Q, K valem 10)
   const figures = ['J', 'Q', 'K', '10'];
   if (figures.includes(card1) && figures.includes(card2)) return true;
   
@@ -98,7 +91,6 @@ io.on('connection', (socket) => {
   
   socket.emit('gameState', gameState);
   
-  // Login
   socket.on('login', (data) => {
     const { username, password } = data;
     
@@ -108,7 +100,6 @@ io.on('connection', (socket) => {
     }
     
     if (users.has(username)) {
-      // Verificar senha
       const user = users.get(username);
       if (user.password === password) {
         socket.emit('loginSuccess', { username, balance: user.balance });
@@ -116,16 +107,13 @@ io.on('connection', (socket) => {
         socket.emit('loginError', { message: 'Senha incorreta!' });
       }
     } else {
-      // Criar novo usuário
       users.set(username, { password, balance: 1000 });
       socket.emit('loginSuccess', { username, balance: 1000 });
     }
   });
   
-  // Adicionar jogador
   socket.on('addPlayer', (data) => {
     if (gameState.players.length < 7) {
-      // Recuperar saldo do usuário
       const user = users.get(data.username);
       const balance = user ? user.balance : 1000;
       
@@ -136,16 +124,20 @@ io.on('connection', (socket) => {
         balance: balance,
         bet: 0,
         cards: [],
-        splitHand: null, // Para mão dividida
+        splitHand: null,
         total: 0,
+        splitTotal: 0,
         busted: false,
+        splitBusted: false,
         blackjack: false,
         standing: false,
+        splitStanding: false,
         result: null,
         betPlaced: false,
         doubled: false,
         canSplit: false,
-        canDouble: false
+        canDouble: false,
+        playingFirstHand: true
       };
       
       gameState.players.push(player);
@@ -154,7 +146,6 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Iniciar fase de apostas
   socket.on('startBetting', () => {
     if (gameState.players.length > 0) {
       if (gameState.deck.length === 0 || needsShuffle()) {
@@ -170,19 +161,21 @@ io.on('connection', (socket) => {
         p.cards = [];
         p.splitHand = null;
         p.busted = false;
+        p.splitBusted = false;
         p.blackjack = false;
         p.standing = false;
+        p.splitStanding = false;
         p.result = null;
         p.doubled = false;
         p.canSplit = false;
         p.canDouble = false;
+        p.playingFirstHand = true;
       });
       io.emit('gameState', gameState);
       io.emit('notification', { message: '💰 Façam suas apostas!' });
     }
   });
   
-  // Fazer aposta
   socket.on('placeBet', (data) => {
     const player = gameState.players.find(p => p.id === socket.id);
     
@@ -209,7 +202,6 @@ io.on('connection', (socket) => {
     gameState.status = 'playing';
     gameState.currentPlayer = 0;
     
-    // Distribuir cartas
     gameState.players = gameState.players.map(p => {
       const card1 = gameState.deck.pop();
       const card2 = gameState.deck.pop();
@@ -220,10 +212,13 @@ io.on('connection', (socket) => {
         cards: [card1, card2],
         splitHand: null,
         busted: false,
+        splitBusted: false,
         blackjack: false,
         standing: false,
+        splitStanding: false,
         result: null,
-        doubled: false
+        doubled: false,
+        playingFirstHand: true
       };
     });
     
@@ -233,7 +228,6 @@ io.on('connection', (socket) => {
       p.canSplit = canSplit(p) && p.balance >= p.bet;
       p.canDouble = p.balance >= p.bet;
       
-      // Se tiver blackjack, não pula a vez ainda (jogador pode ter split)
       if (p.blackjack) {
         p.standing = true;
         p.canSplit = false;
@@ -257,11 +251,9 @@ io.on('connection', (socket) => {
       io.emit('notification', { message: '⚠️ Próxima rodada: Baralhos serão embaralhados!' });
     }
     
-    // Avançar para o próximo jogador se o atual tiver blackjack
     setTimeout(() => skipBlackjackPlayers(), 500);
   }
   
-  // Pular jogadores com blackjack automaticamente
   function skipBlackjackPlayers() {
     while (gameState.currentPlayer < gameState.players.length && 
            gameState.players[gameState.currentPlayer].blackjack) {
@@ -275,20 +267,14 @@ io.on('connection', (socket) => {
     }
   }
   
-  // Dividir (Split)
   socket.on('split', () => {
     const currentPlayer = gameState.players[gameState.currentPlayer];
     
     if (currentPlayer && currentPlayer.id === socket.id && currentPlayer.canSplit && !currentPlayer.splitHand) {
-      // Criar segunda mão
       currentPlayer.splitHand = {
-        cards: [currentPlayer.cards.pop()],
-        total: 0,
-        busted: false,
-        standing: false
+        cards: [currentPlayer.cards.pop()]
       };
       
-      // Adicionar carta em cada mão
       const newCard1 = gameState.deck.pop();
       const newCard2 = gameState.deck.pop();
       gameState.cardsUsed += 2;
@@ -297,32 +283,29 @@ io.on('connection', (socket) => {
       currentPlayer.splitHand.cards.push(newCard2);
       
       currentPlayer.total = calculateTotal(currentPlayer.cards);
-      currentPlayer.splitHand.total = calculateTotal(currentPlayer.splitHand.cards);
+      currentPlayer.splitTotal = calculateTotal(currentPlayer.splitHand.cards);
       
-      // Duplicar aposta
       currentPlayer.balance -= currentPlayer.bet;
       
       currentPlayer.canSplit = false;
       currentPlayer.canDouble = false;
+      currentPlayer.playingFirstHand = true;
       
       io.emit('gameState', gameState);
-      io.emit('notification', { message: `${currentPlayer.name} dividiu a mão!` });
+      io.emit('notification', { message: `${currentPlayer.name} dividiu! Jogando MÃO 1...` });
     }
   });
   
-  // Dobrar (Double)
   socket.on('double', () => {
     const currentPlayer = gameState.players[gameState.currentPlayer];
     
     if (currentPlayer && currentPlayer.id === socket.id && currentPlayer.canDouble && 
-        currentPlayer.cards.length === 2 && !currentPlayer.doubled) {
+        currentPlayer.cards.length === 2 && !currentPlayer.doubled && !currentPlayer.splitHand) {
       
-      // Duplicar aposta
       currentPlayer.balance -= currentPlayer.bet;
       currentPlayer.bet *= 2;
       currentPlayer.doubled = true;
       
-      // Receber apenas mais uma carta
       const newCard = gameState.deck.pop();
       gameState.cardsUsed++;
       currentPlayer.cards.push(newCard);
@@ -343,48 +326,77 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Pedir carta
   socket.on('hit', () => {
     const currentPlayer = gameState.players[gameState.currentPlayer];
     
-    if (currentPlayer && currentPlayer.id === socket.id && !currentPlayer.standing && !currentPlayer.busted) {
+    if (currentPlayer && currentPlayer.id === socket.id) {
       const newCard = gameState.deck.pop();
       gameState.cardsUsed++;
       
-      currentPlayer.cards.push(newCard);
-      currentPlayer.total = calculateTotal(currentPlayer.cards);
-      currentPlayer.canDouble = false;
-      currentPlayer.canSplit = false;
-      
-      if (currentPlayer.total > 21) {
-        currentPlayer.busted = true;
+      if (currentPlayer.splitHand && currentPlayer.playingFirstHand) {
+        // Jogando primeira mão do split
+        currentPlayer.cards.push(newCard);
+        currentPlayer.total = calculateTotal(currentPlayer.cards);
+        currentPlayer.canDouble = false;
+        currentPlayer.canSplit = false;
         
-        // Se tiver mão dividida, jogar ela
-        if (currentPlayer.splitHand && !currentPlayer.splitHand.standing) {
+        if (currentPlayer.total > 21) {
+          currentPlayer.busted = true;
+          currentPlayer.playingFirstHand = false;
           io.emit('gameState', gameState);
-          io.emit('notification', { message: `Jogando segunda mão...` });
-          setTimeout(() => {}, 500);
+          io.emit('notification', { message: `MÃO 1 estourou! Jogando MÃO 2...` });
+          setTimeout(() => io.emit('gameState', gameState), 1000);
         } else {
+          io.emit('gameState', gameState);
+        }
+      } else if (currentPlayer.splitHand && !currentPlayer.playingFirstHand) {
+        // Jogando segunda mão do split
+        currentPlayer.splitHand.cards.push(newCard);
+        currentPlayer.splitTotal = calculateTotal(currentPlayer.splitHand.cards);
+        
+        if (currentPlayer.splitTotal > 21) {
+          currentPlayer.splitBusted = true;
+          io.emit('gameState', gameState);
           setTimeout(() => nextPlayer(), gameState.roundSpeed);
+        } else {
+          io.emit('gameState', gameState);
+        }
+      } else {
+        // Sem split - jogo normal
+        currentPlayer.cards.push(newCard);
+        currentPlayer.total = calculateTotal(currentPlayer.cards);
+        currentPlayer.canDouble = false;
+        currentPlayer.canSplit = false;
+        
+        if (currentPlayer.total > 21) {
+          currentPlayer.busted = true;
+          io.emit('gameState', gameState);
+          setTimeout(() => nextPlayer(), gameState.roundSpeed);
+        } else {
+          io.emit('gameState', gameState);
         }
       }
-      
-      io.emit('gameState', gameState);
     }
   });
   
-  // Parar
   socket.on('stand', () => {
     const currentPlayer = gameState.players[gameState.currentPlayer];
     
     if (currentPlayer && currentPlayer.id === socket.id) {
-      currentPlayer.standing = true;
-      
-      // Se tiver mão dividida e ainda não jogou ela
-      if (currentPlayer.splitHand && !currentPlayer.splitHand.standing) {
+      if (currentPlayer.splitHand && currentPlayer.playingFirstHand) {
+        // Parar primeira mão, ir para segunda
+        currentPlayer.playingFirstHand = false;
         io.emit('gameState', gameState);
-        io.emit('notification', { message: `Jogando segunda mão...` });
+        io.emit('notification', { message: `MÃO 1 parada! Jogando MÃO 2...` });
+      } else if (currentPlayer.splitHand && !currentPlayer.playingFirstHand) {
+        // Parar segunda mão
+        currentPlayer.splitStanding = true;
+        currentPlayer.standing = true;
+        io.emit('gameState', gameState);
+        setTimeout(() => nextPlayer(), gameState.roundSpeed * 0.5);
       } else {
+        // Sem split
+        currentPlayer.standing = true;
         io.emit('gameState', gameState);
         setTimeout(() => nextPlayer(), gameState.roundSpeed * 0.5);
       }
@@ -438,27 +450,55 @@ io.on('connection', (socket) => {
       let newBalance = p.balance;
       let result = '';
       
+      // Avaliar primeira mão
+      let firstHandWin = 0;
       if (p.busted) {
-        newBalance -= p.bet;
-        result = `PERDEU -$${p.bet}`;
+        firstHandWin = -p.bet;
       } else if (p.blackjack && dealerTotal !== 21) {
-        const win = Math.floor(p.bet * 1.5);
-        newBalance += win;
-        result = `BLACKJACK! +$${win}`;
+        firstHandWin = Math.floor(p.bet * 1.5);
       } else if (dealerTotal > 21) {
-        newBalance += p.bet;
-        result = `GANHOU! +$${p.bet}`;
+        firstHandWin = p.bet;
       } else if (p.total > dealerTotal) {
-        newBalance += p.bet;
-        result = `GANHOU! +$${p.bet}`;
+        firstHandWin = p.bet;
       } else if (p.total === dealerTotal) {
-        result = 'EMPATE $0';
+        firstHandWin = 0;
       } else {
-        newBalance -= p.bet;
-        result = `PERDEU -$${p.bet}`;
+        firstHandWin = -p.bet;
       }
       
-      // Salvar saldo no "banco de dados"
+      // Avaliar segunda mão (se tiver split)
+      let secondHandWin = 0;
+      if (p.splitHand) {
+        if (p.splitBusted) {
+          secondHandWin = -p.bet;
+        } else if (dealerTotal > 21) {
+          secondHandWin = p.bet;
+        } else if (p.splitTotal > dealerTotal) {
+          secondHandWin = p.bet;
+        } else if (p.splitTotal === dealerTotal) {
+          secondHandWin = 0;
+        } else {
+          secondHandWin = -p.bet;
+        }
+      }
+      
+      const totalWin = firstHandWin + secondHandWin;
+      newBalance += totalWin;
+      
+      if (p.splitHand) {
+        const h1 = firstHandWin > 0 ? `M1:+$${firstHandWin}` : firstHandWin === 0 ? 'M1:EMPATE' : `M1:-$${Math.abs(firstHandWin)}`;
+        const h2 = secondHandWin > 0 ? `M2:+$${secondHandWin}` : secondHandWin === 0 ? 'M2:EMPATE' : `M2:-$${Math.abs(secondHandWin)}`;
+        result = `${h1} | ${h2} | Total: ${totalWin >= 0 ? '+' : ''}$${totalWin}`;
+      } else {
+        if (firstHandWin > 0) {
+          result = p.blackjack ? `BLACKJACK! +$${firstHandWin}` : `GANHOU! +$${firstHandWin}`;
+        } else if (firstHandWin === 0) {
+          result = 'EMPATE $0';
+        } else {
+          result = `PERDEU -$${Math.abs(firstHandWin)}`;
+        }
+      }
+      
       if (users.has(p.username)) {
         users.get(p.username).balance = newBalance;
       }
@@ -470,10 +510,8 @@ io.on('connection', (socket) => {
     io.emit('gameState', gameState);
   }
   
-  // Nova rodada (infinitas rodadas)
   socket.on('newRound', () => {
     if (gameState.status === 'finished') {
-      // Manter jogadores e saldos
       gameState.players = gameState.players.map(p => ({
         ...p,
         bet: 0,
@@ -481,13 +519,17 @@ io.on('connection', (socket) => {
         cards: [],
         splitHand: null,
         total: 0,
+        splitTotal: 0,
         busted: false,
+        splitBusted: false,
         blackjack: false,
         standing: false,
+        splitStanding: false,
         result: null,
         doubled: false,
         canSplit: false,
-        canDouble: false
+        canDouble: false,
+        playingFirstHand: true
       }));
       
       gameState.dealer = { cards: [], total: 0 };
@@ -505,11 +547,9 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Sair da mesa
   socket.on('leaveTable', () => {
     const player = gameState.players.find(p => p.id === socket.id);
     if (player) {
-      // Salvar saldo final
       if (users.has(player.username)) {
         users.get(player.username).balance = player.balance;
       }
