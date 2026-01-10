@@ -19,6 +19,9 @@ app.use(express.static('public'));
 
 const users = new Map();
 
+// Sistema de bônus diários
+const dailyBonuses = new Map(); // username -> { lastBonus: timestamp, bonusesToday: number }
+
 let gameState = {
   players: [],
   dealer: { cards: [], total: 0 },
@@ -27,7 +30,9 @@ let gameState = {
   cardsUsed: 0,
   currentPlayer: 0,
   status: 'lobby',
-  roundSpeed: 2000
+  roundSpeed: 2000,
+  bettingTimer: null,
+  bettingTimeLeft: 0
 };
 
 function createDeck() {
@@ -112,6 +117,59 @@ io.on('connection', (socket) => {
     }
   });
   
+  // Sistema de bônus diário
+  socket.on('claimDailyBonus', (data) => {
+    const { username } = data;
+    const user = users.get(username);
+    
+    if (!user) {
+      socket.emit('bonusError', { message: 'Usuário não encontrado!' });
+      return;
+    }
+    
+    const now = Date.now();
+    const oneDay = 24 * 60 * 60 * 1000; // 24 horas em milissegundos
+    
+    let bonusData = dailyBonuses.get(username) || { lastBonus: 0, bonusesToday: 0 };
+    
+    // Verificar se passou 24h desde o último bônus
+    if (now - bonusData.lastBonus < oneDay) {
+      const timeLeft = oneDay - (now - bonusData.lastBonus);
+      const hoursLeft = Math.floor(timeLeft / (60 * 60 * 1000));
+      const minutesLeft = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
+      socket.emit('bonusError', { message: `Aguarde ${hoursLeft}h ${minutesLeft}m para o próximo bônus!` });
+      return;
+    }
+    
+    // Resetar contador diário se passou mais de 24h
+    if (now - bonusData.lastBonus >= oneDay) {
+      bonusData.bonusesToday = 0;
+    }
+    
+    // Limitar a 3 bônus por dia
+    if (bonusData.bonusesToday >= 3) {
+      socket.emit('bonusError', { message: 'Você já resgatou 3 bônus hoje! Volte amanhã!' });
+      return;
+    }
+    
+    // Dar o bônus
+    const bonusAmount = 500;
+    user.balance += bonusAmount;
+    bonusData.lastBonus = now;
+    bonusData.bonusesToday++;
+    
+    dailyBonuses.set(username, bonusData);
+    users.set(username, user);
+    
+    socket.emit('bonusSuccess', { 
+      amount: bonusAmount, 
+      newBalance: user.balance,
+      remaining: 3 - bonusData.bonusesToday
+    });
+    
+    io.emit('notification', { message: `${username} ganhou ${bonusAmount} de bônus!` });
+  });
+  
   socket.on('addPlayer', (data) => {
     if (gameState.players.length < 7) {
       const user = users.get(data.username);
@@ -155,6 +213,7 @@ io.on('connection', (socket) => {
       }
       
       gameState.status = 'betting';
+      gameState.bettingTimeLeft = 30; // 30 segundos para apostar
       gameState.players.forEach(p => {
         p.bet = 0;
         p.betPlaced = false;
@@ -172,7 +231,41 @@ io.on('connection', (socket) => {
         p.playingFirstHand = true;
       });
       io.emit('gameState', gameState);
-      io.emit('notification', { message: '💰 Façam suas apostas!' });
+      io.emit('notification', { message: '💰 30 segundos para apostar! Clique nas fichas!' });
+      
+      // Timer de apostas
+      if (gameState.bettingTimer) {
+        clearInterval(gameState.bettingTimer);
+      }
+      
+      gameState.bettingTimer = setInterval(() => {
+        gameState.bettingTimeLeft--;
+        io.emit('bettingTimer', { timeLeft: gameState.bettingTimeLeft });
+        
+        if (gameState.bettingTimeLeft <= 0) {
+          clearInterval(gameState.bettingTimer);
+          
+          // Remover jogadores que não apostaram
+          const playersWhoBet = gameState.players.filter(p => p.betPlaced);
+          const playersWhoDidnt = gameState.players.filter(p => !p.betPlaced);
+          
+          if (playersWhoDidnt.length > 0) {
+            io.emit('notification', { 
+              message: `${playersWhoDidnt.map(p => p.name).join(', ')} não apostaram e ficaram de fora!` 
+            });
+          }
+          
+          gameState.players = playersWhoBet;
+          
+          if (gameState.players.length > 0) {
+            setTimeout(() => startGame(), 2000);
+          } else {
+            gameState.status = 'lobby';
+            io.emit('gameState', gameState);
+            io.emit('notification', { message: 'Ninguém apostou! Voltando ao lobby...' });
+          }
+        }
+      }, 1000);
     }
   });
   
@@ -454,49 +547,55 @@ io.on('connection', (socket) => {
       // Avaliar primeira mão
       let firstHandWin = 0;
       if (p.busted) {
-        firstHandWin = -p.bet;
+        firstHandWin = 0; // Já perdeu a aposta (foi descontada antes)
       } else if (p.blackjack && dealerTotal !== 21) {
-        firstHandWin = Math.floor(p.bet * 1.5);
+        firstHandWin = p.bet + Math.floor(p.bet * 1.5); // Devolve aposta + ganho
       } else if (dealerTotal > 21) {
-        firstHandWin = p.bet;
+        firstHandWin = p.bet * 2; // Devolve aposta + ganho igual
       } else if (p.total > dealerTotal) {
-        firstHandWin = p.bet;
+        firstHandWin = p.bet * 2; // Devolve aposta + ganho igual
       } else if (p.total === dealerTotal) {
-        firstHandWin = 0;
+        firstHandWin = p.bet; // Só devolve a aposta (empate)
       } else {
-        firstHandWin = -p.bet;
+        firstHandWin = 0; // Perdeu (aposta já foi descontada)
       }
       
       // Avaliar segunda mão (se tiver split)
       let secondHandWin = 0;
       if (p.splitHand) {
         if (p.splitBusted) {
-          secondHandWin = -p.bet;
-        } else if (dealerTotal > 21) {
-          secondHandWin = p.bet;
-        } else if (p.splitTotal > dealerTotal) {
-          secondHandWin = p.bet;
-        } else if (p.splitTotal === dealerTotal) {
           secondHandWin = 0;
+        } else if (dealerTotal > 21) {
+          secondHandWin = p.bet * 2;
+        } else if (p.splitTotal > dealerTotal) {
+          secondHandWin = p.bet * 2;
+        } else if (p.splitTotal === dealerTotal) {
+          secondHandWin = p.bet;
         } else {
-          secondHandWin = -p.bet;
+          secondHandWin = 0;
         }
       }
       
       const totalWin = firstHandWin + secondHandWin;
       newBalance += totalWin;
       
+      // Calcular lucro líquido para exibição
+      const betTotal = p.splitHand ? p.bet * 2 : p.bet;
+      const profit = totalWin - betTotal;
+      
       if (p.splitHand) {
-        const h1 = firstHandWin > 0 ? `M1:+$${firstHandWin}` : firstHandWin === 0 ? 'M1:EMPATE' : `M1:-$${Math.abs(firstHandWin)}`;
-        const h2 = secondHandWin > 0 ? `M2:+$${secondHandWin}` : secondHandWin === 0 ? 'M2:EMPATE' : `M2:-$${Math.abs(secondHandWin)}`;
-        result = `${h1} | ${h2} | Total: ${totalWin >= 0 ? '+' : ''}$${totalWin}`;
+        const h1Profit = firstHandWin - p.bet;
+        const h2Profit = secondHandWin - p.bet;
+        const h1 = h1Profit > 0 ? `M1:+${h1Profit}` : h1Profit === 0 ? 'M1:PERDEU' : `M1:PERDEU`;
+        const h2 = h2Profit > 0 ? `M2:+${h2Profit}` : h2Profit === 0 ? 'M2:PERDEU' : `M2:PERDEU`;
+        result = `${h1} | ${h2} | Total: ${profit >= 0 ? '+' : ''}${profit}`;
       } else {
-        if (firstHandWin > 0) {
-          result = p.blackjack ? `BLACKJACK! +$${firstHandWin}` : `GANHOU! +$${firstHandWin}`;
-        } else if (firstHandWin === 0) {
+        if (profit > 0) {
+          result = p.blackjack ? `BLACKJACK! +${profit}` : `GANHOU! +${profit}`;
+        } else if (profit === 0 && !p.busted) {
           result = 'EMPATE $0';
         } else {
-          result = `PERDEU -$${Math.abs(firstHandWin)}`;
+          result = `PERDEU -${betTotal}`;
         }
       }
       
