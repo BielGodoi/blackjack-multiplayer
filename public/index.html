@@ -20,7 +20,9 @@
 
     socket.on('gameState', (state) => {
       gameState = state;
-      render();
+      if (isLoggedIn) {
+        render();
+      }
     });
 
     socket.on('notification', (data) => {
