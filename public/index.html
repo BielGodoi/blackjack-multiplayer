@@ -204,14 +204,16 @@
     }
 
     function render() {
-      if (!gameState && !isLoggedIn) {
+      const app = document.getElementById('app');
+      
+      // Se não está logado, mostrar tela de login
+      if (!isLoggedIn) {
         renderLogin();
         return;
       }
       
       if (!gameState) return;
 
-      const app = document.getElementById('app');
       const myPlayer = gameState.players.find(p => p.id === myId);
       const cardsRemaining = gameState.totalCards - gameState.cardsUsed;
       const percentUsed = Math.round((gameState.cardsUsed / gameState.totalCards) * 100);
@@ -431,7 +433,8 @@
       `;
     }
 
-    render();
+    // Renderizar login inicial
+    renderLogin();
   </script>
 </body>
 </html>
