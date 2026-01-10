@@ -17,6 +17,7 @@
     let gameState = null;
     let myUsername = null;
     let isLoggedIn = false;
+    let bettingTimeLeft = 0;
 
     socket.on('gameState', (state) => {
       gameState = state;
@@ -49,6 +50,15 @@
     socket.on('bonusError', (data) => {
       alert('⚠️ ' + data.message);
     });
+    
+    socket.on('betError', (data) => {
+      showNotification('❌ ' + data.message);
+    });
+    
+    socket.on('bettingTimer', (data) => {
+      bettingTimeLeft = data.timeLeft;
+      render();
+    });
 
     function showNotification(msg) {
       const notif = document.createElement('div');
@@ -78,16 +88,16 @@
       }
     }
 
-    function placeBet() {
-      const betInput = document.getElementById('betInput');
-      const amount = parseInt(betInput.value);
-      const myPlayer = gameState.players.find(p => p.id === myId);
-      
-      if (amount >= 5 && amount <= myPlayer.balance) {
-        socket.emit('placeBet', { amount });
-      } else {
-        alert(`Aposta deve ser entre $5 e $${myPlayer.balance}`);
-      }
+    function placeBet(amount) {
+      socket.emit('placeBet', { amount });
+    }
+    
+    function confirmBet() {
+      socket.emit('confirmBet');
+    }
+    
+    function clearBet() {
+      socket.emit('clearBet');
     }
 
     function startBetting() {
@@ -311,44 +321,74 @@
       }
 
       if (gameState.status === 'betting') {
-        const allBetsPlaced = gameState.players.every(p => p.betPlaced);
-        
         html += `
           <div class="bg-gray-900/80 backdrop-blur-md p-8 rounded-2xl shadow-2xl border-4 border-yellow-500 mb-6">
-            <h2 class="text-3xl font-black text-white mb-6 text-center">💰 FASE DE APOSTAS</h2>
+            <div class="flex justify-between items-center mb-6">
+              <h2 class="text-3xl font-black text-white">💰 FASE DE APOSTAS</h2>
+              <div class="text-center bg-red-600 px-6 py-3 rounded-xl border-4 border-red-400">
+                <div class="text-white font-black text-4xl">${bettingTimeLeft}s</div>
+                <div class="text-yellow-300 text-sm font-bold">Tempo restante</div>
+              </div>
+            </div>
             
             ${myPlayer && !myPlayer.betPlaced ? `
               <div class="bg-gradient-to-r from-green-900/60 to-green-800/60 p-6 rounded-xl border-2 border-green-500 mb-6">
-                <h3 class="text-2xl font-bold text-white mb-4 text-center">Sua Vez de Apostar!</h3>
-                <div class="mb-4">
-                  <label class="block text-white font-bold mb-3 text-center">
-                    💵 Escolha sua aposta: $<span id="betDisplay">10</span>
-                  </label>
-                  <input 
-                    type="range" 
-                    id="betInput" 
-                    min="5" 
-                    max="${myPlayer.balance}" 
-                    step="5" 
-                    value="10" 
-                    class="w-full h-3 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-green-500" 
-                    oninput="document.getElementById('betDisplay').textContent = this.value"
-                  />
-                  <div class="flex justify-between text-sm text-gray-400 mt-2">
-                    <span>Mínimo: $5</span>
-                    <span>Máximo: $${myPlayer.balance}</span>
+                <h3 class="text-2xl font-bold text-white mb-4 text-center">🎰 Sua Vez de Apostar!</h3>
+                
+                <!-- Fichas de Poker -->
+                <div class="mb-6">
+                  <p class="text-white text-center mb-4 font-bold">Clique nas fichas para apostar:</p>
+                  <div class="flex gap-4 justify-center flex-wrap">
+                    <button onclick="placeBet(5)" class="chip-button transform hover:scale-110 transition-transform">
+                      <div class="w-20 h-20 bg-red-600 border-4 border-white rounded-full flex flex-col items-center justify-center shadow-2xl">
+                        <span class="text-white font-black text-xl">$5</span>
+                        <span class="text-white text-xs">●●●</span>
+                      </div>
+                    </button>
+                    <button onclick="placeBet(10)" class="chip-button transform hover:scale-110 transition-transform">
+                      <div class="w-20 h-20 bg-blue-600 border-4 border-white rounded-full flex flex-col items-center justify-center shadow-2xl">
+                        <span class="text-white font-black text-xl">$10</span>
+                        <span class="text-white text-xs">●●●</span>
+                      </div>
+                    </button>
+                    <button onclick="placeBet(25)" class="chip-button transform hover:scale-110 transition-transform">
+                      <div class="w-20 h-20 bg-green-600 border-4 border-white rounded-full flex flex-col items-center justify-center shadow-2xl">
+                        <span class="text-white font-black text-xl">$25</span>
+                        <span class="text-white text-xs">●●●</span>
+                      </div>
+                    </button>
+                    <button onclick="placeBet(50)" class="chip-button transform hover:scale-110 transition-transform">
+                      <div class="w-24 h-24 bg-purple-600 border-4 border-white rounded-full flex flex-col items-center justify-center shadow-2xl">
+                        <span class="text-white font-black text-2xl">$50</span>
+                        <span class="text-white text-xs">●●●●</span>
+                      </div>
+                    </button>
+                    <button onclick="placeBet(100)" class="chip-button transform hover:scale-110 transition-transform">
+                      <div class="w-24 h-24 bg-black border-4 border-yellow-400 rounded-full flex flex-col items-center justify-center shadow-2xl">
+                        <span class="text-yellow-400 font-black text-2xl">$100</span>
+                        <span class="text-yellow-400 text-xs">●●●●●</span>
+                      </div>
+                    </button>
                   </div>
                 </div>
-                <div class="flex gap-2 mb-4 flex-wrap">
-                  <button onclick="document.getElementById('betInput').value = 5; document.getElementById('betDisplay').textContent = 5" class="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white font-bold rounded-lg">$5</button>
-                  <button onclick="document.getElementById('betInput').value = 10; document.getElementById('betDisplay').textContent = 10" class="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white font-bold rounded-lg">$10</button>
-                  <button onclick="document.getElementById('betInput').value = 25; document.getElementById('betDisplay').textContent = 25" class="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white font-bold rounded-lg">$25</button>
-                  <button onclick="document.getElementById('betInput').value = 50; document.getElementById('betDisplay').textContent = 50" class="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white font-bold rounded-lg">$50</button>
-                  <button onclick="document.getElementById('betInput').value = 100; document.getElementById('betDisplay').textContent = 100" class="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white font-bold rounded-lg">$100</button>
+                
+                <!-- Aposta Atual -->
+                <div class="bg-black/40 p-4 rounded-lg mb-4 text-center">
+                  <p class="text-gray-400 text-sm">Sua aposta atual:</p>
+                  <p class="text-yellow-400 font-black text-4xl">${myPlayer.bet}</p>
+                  <p class="text-gray-400 text-xs mt-2">Mínimo: $5 | Máximo: $500</p>
+                  <p class="text-green-400 text-sm">Saldo disponível: ${myPlayer.balance}</p>
                 </div>
-                <button onclick="placeBet()" class="w-full py-4 bg-gradient-to-r from-yellow-600 to-yellow-700 hover:from-yellow-700 hover:to-yellow-800 text-white font-black text-xl rounded-xl transition-all shadow-2xl">
-                  ✅ CONFIRMAR APOSTA
-                </button>
+                
+                <!-- Botões de Controle -->
+                <div class="flex gap-3">
+                  <button onclick="clearBet()" class="flex-1 py-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg transition-colors">
+                    🗑️ LIMPAR
+                  </button>
+                  <button onclick="confirmBet()" class="flex-1 py-3 bg-green-600 hover:bg-green-700 text-white font-black text-lg rounded-lg transition-colors shadow-lg ${myPlayer.bet < 5 ? 'opacity-50 cursor-not-allowed' : ''}">
+                    ✅ CONFIRMAR APOSTA
+                  </button>
+                </div>
               </div>
             ` : ''}
             
@@ -360,23 +400,21 @@
                     <span class="text-white font-bold">${p.name} ${p.id === myId ? '(VOCÊ)' : ''}</span>
                     ${p.betPlaced ? `
                       <div class="text-right">
-                        <div class="text-green-400 text-sm">✅ Apostou</div>
-                        <div class="text-yellow-400 font-bold">$${p.bet}</div>
+                        <div class="text-green-400 text-sm">✅ Confirmado</div>
+                        <div class="text-yellow-400 font-bold">${p.bet}</div>
+                      </div>
+                    ` : p.bet > 0 ? `
+                      <div class="text-right">
+                        <div class="text-yellow-400 text-sm animate-pulse">⏳ Apostando...</div>
+                        <div class="text-white font-bold">${p.bet}</div>
                       </div>
                     ` : `
-                      <div class="text-gray-400 text-sm animate-pulse">⏳ Apostando...</div>
+                      <div class="text-gray-400 text-sm">💭 Pensando...</div>
                     `}
                   </div>
                 </div>
               `).join('')}
             </div>
-            
-            ${allBetsPlaced ? `
-              <div class="mt-6 text-center">
-                <p class="text-green-400 text-2xl font-black animate-pulse">🎉 Todas as apostas confirmadas!</p>
-                <p class="text-white text-sm mt-2">Distribuindo cartas...</p>
-              </div>
-            ` : ''}
           </div>
         `;
       }
