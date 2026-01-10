@@ -32,12 +32,22 @@
     socket.on('loginSuccess', (data) => {
       isLoggedIn = true;
       myUsername = data.username;
-      showNotification(`✅ Bem-vindo, ${data.username}! Saldo: $${data.balance}`);
+      showNotification(`✅ Bem-vindo, ${data.username}! Saldo: ${data.balance}`);
       render();
     });
 
     socket.on('loginError', (data) => {
       alert('❌ ' + data.message);
+    });
+    
+    socket.on('bonusSuccess', (data) => {
+      showNotification(`🎁 Você ganhou ${data.amount}! Novo saldo: ${data.newBalance}`);
+      showNotification(`Bônus restantes hoje: ${data.remaining}/3`);
+      render();
+    });
+    
+    socket.on('bonusError', (data) => {
+      alert('⚠️ ' + data.message);
     });
 
     function showNotification(msg) {
@@ -110,6 +120,10 @@
         myId = null;
         render();
       }
+    }
+    
+    function claimBonus() {
+      socket.emit('claimDailyBonus', { username: myUsername });
     }
 
     function renderCard(card) {
@@ -238,7 +252,14 @@
         <div class="bg-gradient-to-r from-yellow-600 via-yellow-500 to-yellow-600 p-6 rounded-2xl shadow-2xl mb-6 border-4 border-yellow-400">
           <div class="flex justify-between items-center">
             <h1 class="text-4xl font-black text-white drop-shadow-lg">🎰 BLACKJACK EVOLUTION 🎰</h1>
-            ${isLoggedIn ? `<div class="text-white font-bold">👤 ${myUsername}</div>` : ''}
+            <div class="text-right">
+              ${isLoggedIn ? `
+                <div class="text-white font-bold text-lg">👤 ${myUsername}</div>
+                <button onclick="claimBonus()" class="mt-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white font-bold rounded-lg shadow-lg transition-colors text-sm">
+                  🎁 BÔNUS DIÁRIO
+                </button>
+              ` : ''}
+            </div>
           </div>
           <p class="text-center text-yellow-100 mt-2 font-bold">Multiplayer Online - ${gameState.players.length}/7 Jogadores</p>
           ${gameState.status !== 'lobby' ? `
@@ -442,7 +463,8 @@
               ✅ ENTRAR / CADASTRAR
             </button>
             <p class="text-gray-400 text-sm text-center mt-4">
-              💡 Se o usuário não existir, será criado automaticamente com $1000 de saldo inicial!
+              💡 Novo usuário recebe <span class="text-green-400 font-bold">$1000</span> iniciais!<br>
+              🎁 Bônus diário de <span class="text-yellow-400 font-bold">$500</span> (até 3x por dia)
             </p>
           </div>
         </div>
