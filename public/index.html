@@ -12,7 +12,7 @@
 
   <script>
     // Conectar ao servidor - ALTERE AQUI para o URL do seu servidor quando hospedar
-    const socket = io('http://localhost:3000');
+    const socket = io();
     
     let myId = null;
     let gameState = null;
@@ -264,4 +264,5 @@ blackjack-game/
 ├── server.js          ← Artifact 1 (servidor)
 ├── package.json       ← Artifact 3 (configuração)
 └── public/
+
     └── index.html     ← ESTE CÓDIGO AQUI ☝️
