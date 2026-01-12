@@ -4,15 +4,16 @@
   "description": "Jogo de Blackjack Multiplayer Online com Banco de Dados",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build": "echo 'Build completed'"
   },
   "dependencies": {
     "express": "^4.18.2",
     "socket.io": "^4.5.4",
-    "sqlite3": "^5.1.6",
+    "better-sqlite3": "^9.2.2",
     "bcryptjs": "^2.4.3"
   },
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=18.0.0"
   }
 }
