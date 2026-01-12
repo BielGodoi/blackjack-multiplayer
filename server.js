@@ -2,7 +2,7 @@
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
-const sqlite3 = require('sqlite3').verbose();
+const Database = require('better-sqlite3');
 const bcrypt = require('bcryptjs');
 
 const app = express();
@@ -19,181 +19,177 @@ const PORT = process.env.PORT || 3000;
 app.use(express.static('public'));
 
 // ===== BANCO DE DADOS =====
-const db = new sqlite3.Database('./blackjack.db', (err) => {
-  if (err) {
-    console.error('❌ Erro ao conectar no banco de dados:', err);
-  } else {
-    console.log('✅ Banco de dados conectado!');
-    initDatabase();
-  }
-});
+let db;
+try {
+  db = new Database('./blackjack.db');
+  console.log('✅ Banco de dados conectado!');
+  initDatabase();
+} catch (err) {
+  console.error('❌ Erro ao conectar no banco de dados:', err);
+  // Se falhar, criar em memória temporariamente
+  db = new Database(':memory:');
+  initDatabase();
+}
 
 // Criar tabelas
 function initDatabase() {
-  // Tabela de usuários
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE NOT NULL,
-      password TEXT NOT NULL,
-      balance REAL DEFAULT 1000,
-      total_wins INTEGER DEFAULT 0,
-      total_losses INTEGER DEFAULT 0,
-      total_games INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      last_login DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `, (err) => {
-    if (err) console.error('Erro ao criar tabela users:', err);
-    else console.log('✅ Tabela users criada/verificada');
-  });
+  try {
+    // Tabela de usuários
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        balance REAL DEFAULT 1000,
+        total_wins INTEGER DEFAULT 0,
+        total_losses INTEGER DEFAULT 0,
+        total_games INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_login DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Tabela users criada/verificada');
 
-  // Tabela de bônus diários
-  db.run(`
-    CREATE TABLE IF NOT EXISTS daily_bonuses (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      last_bonus DATETIME DEFAULT CURRENT_TIMESTAMP,
-      bonuses_today INTEGER DEFAULT 0,
-      FOREIGN KEY (user_id) REFERENCES users (id)
-    )
-  `, (err) => {
-    if (err) console.error('Erro ao criar tabela daily_bonuses:', err);
-    else console.log('✅ Tabela daily_bonuses criada/verificada');
-  });
+    // Tabela de bônus diários
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS daily_bonuses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        last_bonus DATETIME DEFAULT CURRENT_TIMESTAMP,
+        bonuses_today INTEGER DEFAULT 0,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+      )
+    `);
+    console.log('✅ Tabela daily_bonuses criada/verificada');
 
-  // Tabela de histórico de jogos
-  db.run(`
-    CREATE TABLE IF NOT EXISTS game_history (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      bet_amount REAL NOT NULL,
-      win_amount REAL NOT NULL,
-      result TEXT NOT NULL,
-      cards TEXT,
-      dealer_cards TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users (id)
-    )
-  `, (err) => {
-    if (err) console.error('Erro ao criar tabela game_history:', err);
-    else console.log('✅ Tabela game_history criada/verificada');
-  });
+    // Tabela de histórico de jogos
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS game_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        bet_amount REAL NOT NULL,
+        win_amount REAL NOT NULL,
+        result TEXT NOT NULL,
+        cards TEXT,
+        dealer_cards TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+      )
+    `);
+    console.log('✅ Tabela game_history criada/verificada');
+  } catch (err) {
+    console.error('❌ Erro ao criar tabelas:', err);
+  }
 }
 
-// ===== FUNÇÕES DO BANCO DE DADOS =====
+// ===== FUNÇÕES DO BANCO DE DADOS (better-sqlite3 - síncrono) =====
 
-// Criar novo usuário
-function createUser(username, password, callback) {
-  const hashedPassword = bcrypt.hashSync(password, 10);
-  db.run(
-    'INSERT INTO users (username, password, balance) VALUES (?, ?, ?)',
-    [username, hashedPassword, 1000],
-    function(err) {
-      if (err) {
-        callback(err, null);
-      } else {
-        callback(null, { id: this.lastID, username, balance: 1000 });
-      }
-    }
-  );
+function createUser(username, password) {
+  try {
+    const hashedPassword = bcrypt.hashSync(password, 10);
+    const stmt = db.prepare('INSERT INTO users (username, password, balance) VALUES (?, ?, ?)');
+    const result = stmt.run(username, hashedPassword, 1000);
+    return { id: result.lastInsertRowid, username, balance: 1000 };
+  } catch (err) {
+    console.error('Erro ao criar usuário:', err);
+    return null;
+  }
 }
 
-// Buscar usuário
-function getUser(username, callback) {
-  db.get('SELECT * FROM users WHERE username = ?', [username], callback);
+function getUser(username) {
+  try {
+    const stmt = db.prepare('SELECT * FROM users WHERE username = ?');
+    return stmt.get(username);
+  } catch (err) {
+    console.error('Erro ao buscar usuário:', err);
+    return null;
+  }
 }
 
-// Atualizar saldo
-function updateBalance(username, newBalance, callback) {
-  db.run(
-    'UPDATE users SET balance = ? WHERE username = ?',
-    [newBalance, username],
-    callback
-  );
+function updateBalance(username, newBalance) {
+  try {
+    const stmt = db.prepare('UPDATE users SET balance = ? WHERE username = ?');
+    stmt.run(newBalance, username);
+  } catch (err) {
+    console.error('Erro ao atualizar saldo:', err);
+  }
 }
 
-// Atualizar último login
 function updateLastLogin(username) {
-  db.run(
-    'UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE username = ?',
-    [username]
-  );
+  try {
+    const stmt = db.prepare('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE username = ?');
+    stmt.run(username);
+  } catch (err) {
+    console.error('Erro ao atualizar login:', err);
+  }
 }
 
-// Salvar histórico de jogo
 function saveGameHistory(username, betAmount, winAmount, result, cards, dealerCards) {
-  db.get('SELECT id FROM users WHERE username = ?', [username], (err, user) => {
-    if (!err && user) {
-      db.run(
-        'INSERT INTO game_history (user_id, bet_amount, win_amount, result, cards, dealer_cards) VALUES (?, ?, ?, ?, ?, ?)',
-        [user.id, betAmount, winAmount, result, JSON.stringify(cards), JSON.stringify(dealerCards)]
-      );
+  try {
+    const user = getUser(username);
+    if (user) {
+      const stmt = db.prepare('INSERT INTO game_history (user_id, bet_amount, win_amount, result, cards, dealer_cards) VALUES (?, ?, ?, ?, ?, ?)');
+      stmt.run(user.id, betAmount, winAmount, result, JSON.stringify(cards), JSON.stringify(dealerCards));
     }
-  });
+  } catch (err) {
+    console.error('Erro ao salvar histórico:', err);
+  }
 }
 
-// Atualizar estatísticas
 function updateStats(username, won) {
-  db.run(`
-    UPDATE users 
-    SET total_games = total_games + 1,
-        total_wins = total_wins + ?,
-        total_losses = total_losses + ?
-    WHERE username = ?
-  `, [won ? 1 : 0, won ? 0 : 1, username]);
+  try {
+    const stmt = db.prepare(`
+      UPDATE users 
+      SET total_games = total_games + 1,
+          total_wins = total_wins + ?,
+          total_losses = total_losses + ?
+      WHERE username = ?
+    `);
+    stmt.run(won ? 1 : 0, won ? 0 : 1, username);
+  } catch (err) {
+    console.error('Erro ao atualizar stats:', err);
+  }
 }
 
-// Bônus diário
-function checkDailyBonus(username, callback) {
-  db.get('SELECT id FROM users WHERE username = ?', [username], (err, user) => {
-    if (err || !user) return callback(err);
+function checkDailyBonus(username) {
+  try {
+    const user = getUser(username);
+    if (!user) return { canClaim: false, message: 'Usuário não encontrado' };
     
-    db.get(
-      'SELECT * FROM daily_bonuses WHERE user_id = ?',
-      [user.id],
-      (err, bonus) => {
-        if (err) return callback(err);
-        
-        const now = Date.now();
-        const oneDay = 24 * 60 * 60 * 1000;
-        
-        if (!bonus) {
-          // Primeiro bônus
-          db.run(
-            'INSERT INTO daily_bonuses (user_id, bonuses_today) VALUES (?, ?)',
-            [user.id, 1],
-            () => callback(null, { canClaim: true, remaining: 2 })
-          );
-        } else {
-          const lastBonus = new Date(bonus.last_bonus).getTime();
-          
-          if (now - lastBonus < oneDay) {
-            // Ainda no mesmo dia
-            if (bonus.bonuses_today >= 3) {
-              const timeLeft = oneDay - (now - lastBonus);
-              const hours = Math.floor(timeLeft / (60 * 60 * 1000));
-              const minutes = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
-              callback(null, { canClaim: false, message: `Aguarde ${hours}h ${minutes}m` });
-            } else {
-              db.run(
-                'UPDATE daily_bonuses SET bonuses_today = bonuses_today + 1, last_bonus = CURRENT_TIMESTAMP WHERE user_id = ?',
-                [user.id],
-                () => callback(null, { canClaim: true, remaining: 2 - bonus.bonuses_today })
-              );
-            }
-          } else {
-            // Novo dia
-            db.run(
-              'UPDATE daily_bonuses SET bonuses_today = 1, last_bonus = CURRENT_TIMESTAMP WHERE user_id = ?',
-              [user.id],
-              () => callback(null, { canClaim: true, remaining: 2 })
-            );
-          }
-        }
+    const bonusStmt = db.prepare('SELECT * FROM daily_bonuses WHERE user_id = ?');
+    const bonus = bonusStmt.get(user.id);
+    
+    const now = Date.now();
+    const oneDay = 24 * 60 * 60 * 1000;
+    
+    if (!bonus) {
+      const insertStmt = db.prepare('INSERT INTO daily_bonuses (user_id, bonuses_today) VALUES (?, ?)');
+      insertStmt.run(user.id, 1);
+      return { canClaim: true, remaining: 2 };
+    }
+    
+    const lastBonus = new Date(bonus.last_bonus).getTime();
+    
+    if (now - lastBonus < oneDay) {
+      if (bonus.bonuses_today >= 3) {
+        const timeLeft = oneDay - (now - lastBonus);
+        const hours = Math.floor(timeLeft / (60 * 60 * 1000));
+        const minutes = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
+        return { canClaim: false, message: `Aguarde ${hours}h ${minutes}m` };
+      } else {
+        const updateStmt = db.prepare('UPDATE daily_bonuses SET bonuses_today = bonuses_today + 1, last_bonus = CURRENT_TIMESTAMP WHERE user_id = ?');
+        updateStmt.run(user.id);
+        return { canClaim: true, remaining: 2 - bonus.bonuses_today };
       }
-    );
-  });
+    } else {
+      const updateStmt = db.prepare('UPDATE daily_bonuses SET bonuses_today = 1, last_bonus = CURRENT_TIMESTAMP WHERE user_id = ?');
+      updateStmt.run(user.id);
+      return { canClaim: true, remaining: 2 };
+    }
+  } catch (err) {
+    console.error('Erro ao verificar bônus:', err);
+    return { canClaim: false, message: 'Erro no servidor' };
+  }
 }
 
 // ===== ESTADO DO JOGO =====
@@ -284,123 +280,111 @@ io.on('connection', (socket) => {
       return;
     }
     
-    getUser(username, (err, user) => {
-      if (err) {
-        socket.emit('loginError', { message: 'Erro no servidor!' });
-        return;
-      }
-      
-      if (user) {
-        // Usuário existe - verificar senha
-        if (bcrypt.compareSync(password, user.password)) {
-          updateLastLogin(username);
-          console.log(`✅ Login bem-sucedido: ${username}, Saldo: $${user.balance}`);
-          socket.emit('loginSuccess', { 
-            username: user.username, 
-            balance: user.balance,
-            stats: {
-              totalGames: user.total_games,
-              totalWins: user.total_wins,
-              totalLosses: user.total_losses
-            }
-          });
-        } else {
-          console.log(`❌ Senha incorreta: ${username}`);
-          socket.emit('loginError', { message: 'Senha incorreta!' });
-        }
-      } else {
-        // Criar novo usuário
-        createUser(username, password, (err, newUser) => {
-          if (err) {
-            socket.emit('loginError', { message: 'Erro ao criar usuário!' });
-          } else {
-            console.log(`🆕 Novo usuário: ${username} com $1000`);
-            socket.emit('loginSuccess', { 
-              username: newUser.username, 
-              balance: newUser.balance,
-              stats: { totalGames: 0, totalWins: 0, totalLosses: 0 }
-            });
+    const user = getUser(username);
+    
+    if (user) {
+      // Usuário existe - verificar senha
+      if (bcrypt.compareSync(password, user.password)) {
+        updateLastLogin(username);
+        console.log(`✅ Login bem-sucedido: ${username}, Saldo: ${user.balance}`);
+        socket.emit('loginSuccess', { 
+          username: user.username, 
+          balance: user.balance,
+          stats: {
+            totalGames: user.total_games,
+            totalWins: user.total_wins,
+            totalLosses: user.total_losses
           }
         });
+      } else {
+        console.log(`❌ Senha incorreta: ${username}`);
+        socket.emit('loginError', { message: 'Senha incorreta!' });
       }
-    });
+    } else {
+      // Criar novo usuário
+      const newUser = createUser(username, password);
+      if (newUser) {
+        console.log(`🆕 Novo usuário: ${username} com $1000`);
+        socket.emit('loginSuccess', { 
+          username: newUser.username, 
+          balance: newUser.balance,
+          stats: { totalGames: 0, totalWins: 0, totalLosses: 0 }
+        });
+      } else {
+        socket.emit('loginError', { message: 'Erro ao criar usuário!' });
+      }
+    }
   });
   
   // BÔNUS DIÁRIO
   socket.on('claimDailyBonus', (data) => {
     const { username } = data;
     
-    checkDailyBonus(username, (err, result) => {
-      if (err) {
-        socket.emit('bonusError', { message: 'Erro ao resgatar bônus!' });
-        return;
-      }
-      
-      if (!result.canClaim) {
-        socket.emit('bonusError', { message: result.message });
-        return;
-      }
-      
-      getUser(username, (err, user) => {
-        if (err || !user) return;
-        
-        const bonusAmount = 500;
-        const newBalance = user.balance + bonusAmount;
-        
-        updateBalance(username, newBalance, () => {
-          socket.emit('bonusSuccess', { 
-            amount: bonusAmount, 
-            newBalance: newBalance,
-            remaining: result.remaining
-          });
-          
-          // Atualizar jogador na mesa
-          const player = gameState.players.find(p => p.username === username);
-          if (player) {
-            player.balance = newBalance;
-            io.emit('gameState', gameState);
-          }
-          
-          console.log(`🎁 ${username} ganhou $${bonusAmount}. Novo saldo: $${newBalance}`);
-        });
-      });
+    const result = checkDailyBonus(username);
+    
+    if (!result.canClaim) {
+      socket.emit('bonusError', { message: result.message });
+      return;
+    }
+    
+    const user = getUser(username);
+    if (!user) return;
+    
+    const bonusAmount = 500;
+    const newBalance = user.balance + bonusAmount;
+    
+    updateBalance(username, newBalance);
+    
+    socket.emit('bonusSuccess', { 
+      amount: bonusAmount, 
+      newBalance: newBalance,
+      remaining: result.remaining
     });
+    
+    // Atualizar jogador na mesa
+    const player = gameState.players.find(p => p.username === username);
+    if (player) {
+      player.balance = newBalance;
+      io.emit('gameState', gameState);
+    }
+    
+    console.log(`🎁 ${username} ganhou ${bonusAmount}. Novo saldo: ${newBalance}`);
   });
   
   // ADICIONAR JOGADOR
   socket.on('addPlayer', (data) => {
     if (gameState.players.length < 7 && gameState.status === 'lobby') {
-      getUser(data.username, (err, user) => {
-        if (err || !user) return;
-        
-        const player = {
-          id: socket.id,
-          name: data.name,
-          username: data.username,
-          balance: user.balance,
-          bet: 0,
-          cards: [],
-          splitHand: null,
-          total: 0,
-          splitTotal: 0,
-          busted: false,
-          splitBusted: false,
-          blackjack: false,
-          standing: false,
-          splitStanding: false,
-          result: null,
-          betPlaced: false,
-          doubled: false,
-          canSplit: false,
-          canDouble: false,
-          playingFirstHand: true
-        };
-        
-        gameState.players.push(player);
-        io.emit('gameState', gameState);
-        io.emit('notification', { message: `${data.name} entrou!` });
-        console.log(`👤 ${data.name} entrou com $${user.balance}`);
-      });
+      const user = getUser(data.username);
+      if (!user) return;
+      
+      const player = {
+        id: socket.id,
+        name: data.name,
+        username: data.username,
+        balance: user.balance,
+        bet: 0,
+        cards: [],
+        splitHand: null,
+        total: 0,
+        splitTotal: 0,
+        busted: false,
+        splitBusted: false,
+        blackjack: false,
+        standing: false,
+        splitStanding: false,
+        result: null,
+        betPlaced: false,
+        doubled: false,
+        canSplit: false,
+        canDouble: false,
+        playingFirstHand: true,
+        lastWin: 0
+      };
+      
+      gameState.players.push(player);
+      io.emit('gameState', gameState);
+      io.emit('notification', { message: `${data.name} entrou!` });
+      console.log(`👤 ${data.name} entrou com ${user.balance}`);
     }
   });
   
