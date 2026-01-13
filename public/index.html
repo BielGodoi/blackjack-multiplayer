@@ -14,7 +14,6 @@
       overflow-x: hidden;
     }
     
-    /* Header */
     .header {
       background: #1a1a1a;
       border-bottom: 3px solid #d4af37;
@@ -38,7 +37,6 @@
     .btn-red { background: #c41e3a; color: white; }
     .btn-red:hover { background: #e02444; }
     
-    /* Login Screen */
     .login-screen {
       display: flex;
       align-items: center;
@@ -67,14 +65,12 @@
     }
     .login-box input:focus { outline: none; border-color: #d4af37; }
     
-    /* Game Table */
     .game-container {
       max-width: 1400px;
       margin: 0 auto;
       padding: 20px;
     }
     
-    /* Dealer Area */
     .dealer-area {
       text-align: center;
       padding: 30px;
@@ -112,7 +108,6 @@
     .card-suit { font-size: 36px; }
     .dealer-total { color: white; font-size: 20px; font-weight: bold; }
     
-    /* Players Grid */
     .players-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -134,7 +129,6 @@
     .player-name { color: white; font-weight: bold; font-size: 18px; }
     .player-balance { color: #d4af37; font-weight: bold; }
     
-    /* Bottom Stats (Estilo da foto) */
     .bottom-stats {
       position: fixed;
       bottom: 0;
@@ -166,7 +160,6 @@
       font-weight: bold;
     }
     
-    /* Betting Area */
     .betting-area {
       text-align: center;
       padding: 30px;
@@ -231,7 +224,6 @@
       margin-top: 10px;
     }
     
-    /* Action Buttons */
     .action-buttons {
       display: flex;
       gap: 15px;
@@ -250,9 +242,7 @@
     .btn-hit { background: #1e4ac4; color: white; }
     .btn-stand { background: #d97706; color: white; }
     .btn-double { background: #7a2d7a; color: white; }
-    .btn-split { background: #c41e3a; color: white; }
     
-    /* Notification */
     .notification {
       position: fixed;
       top: 20px;
@@ -329,7 +319,6 @@
     function clearBet() { socket.emit('clearBet'); }
     function hit() { socket.emit('hit'); }
     function stand() { socket.emit('stand'); }
-    function split() { socket.emit('split'); }
     function double() { socket.emit('double'); }
     function newRound() { socket.emit('newRound'); }
     function leaveTable() { if (confirm('Sair?')) { socket.emit('leaveTable'); myId = null; render(); } }
@@ -367,7 +356,6 @@
     function render() {
       const app = document.getElementById('app');
       
-      // LOGIN
       if (!isLoggedIn) {
         app.innerHTML = `
           <div class="login-screen">
@@ -387,7 +375,6 @@
       
       const myP = gameState.players.find(p => p.id === myId);
       
-      // ENTRAR NA MESA
       if (!myId) {
         app.innerHTML = `
           <div class="header">
@@ -408,7 +395,6 @@
         return;
       }
       
-      // JOGO
       let html = `
         <div class="header">
           <div class="logo">BLACKJACK</div>
@@ -422,7 +408,6 @@
         <div class="game-container">
       `;
       
-      // LOBBY
       if (gameState.status === 'lobby') {
         html += `
           <div style="text-align:center;padding:50px;">
@@ -442,7 +427,6 @@
         `;
       }
       
-      // APOSTAS
       if (gameState.status === 'betting') {
         html += `
           <div class="betting-area">
@@ -476,7 +460,6 @@
         `;
       }
       
-      // JOGANDO
       if (gameState.status === 'playing' || gameState.status === 'finished') {
         html += `
           <div class="dealer-area">
@@ -496,7 +479,6 @@
                 <button onclick="hit()" class="action-btn btn-hit">🃏 PEDIR</button>
                 <button onclick="stand()" class="action-btn btn-stand">✋ PARAR</button>
                 ${gameState.players[gameState.currentPlayer].canDouble ? `<button onclick="double()" class="action-btn btn-double">⚡ DOBRAR</button>` : ''}
-                ${gameState.players[gameState.currentPlayer].canSplit ? `<button onclick="split()" class="action-btn btn-split">✂️ DIVIDIR</button>` : ''}
               </div>
             </div>
           ` : ''}
@@ -511,7 +493,6 @@
       
       html += '</div>';
       
-      // BOTTOM STATS (Estilo da foto)
       if (myP) {
         const lastWin = myP.result ? (myP.result.includes('+') ? myP.result.match(/\+\$(\d+)/)?.[1] || '0' : '0') : '0';
         html += `
