@@ -1,7 +1,7 @@
 {
   "name": "blackjack-multiplayer",
   "version": "1.0.0",
-  "description": "Jogo de Blackjack Multiplayer Online com Banco de Dados",
+  "description": "Jogo de Blackjack Multiplayer Online",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
