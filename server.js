@@ -1,8 +1,9 @@
-// server.js - Servidor Node.js para Blackjack Multiplayer com Banco de Dados
+// server.js - Servidor Node.js para Blackjack Multiplayer com Banco de Dados JSON
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
-const Database = require('better-sqlite3');
+const fs = require('fs');
+const path = require('path');
 const bcrypt = require('bcryptjs');
 
 const app = express();
@@ -18,179 +19,152 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.static('public'));
 
-// ===== BANCO DE DADOS =====
-let db;
-try {
-  db = new Database('./blackjack.db');
-  console.log('✅ Banco de dados conectado!');
-  initDatabase();
-} catch (err) {
-  console.error('❌ Erro ao conectar no banco de dados:', err);
-  // Se falhar, criar em memória temporariamente
-  db = new Database(':memory:');
-  initDatabase();
-}
+// ===== BANCO DE DADOS JSON =====
+const DB_FILE = path.join(__dirname, 'database.json');
 
-// Criar tabelas
-function initDatabase() {
+// Estrutura do banco de dados
+let database = {
+  users: {},
+  dailyBonuses: {},
+  gameHistory: []
+};
+
+// Carregar banco de dados
+function loadDatabase() {
   try {
-    // Tabela de usuários
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        balance REAL DEFAULT 1000,
-        total_wins INTEGER DEFAULT 0,
-        total_losses INTEGER DEFAULT 0,
-        total_games INTEGER DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_login DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    console.log('✅ Tabela users criada/verificada');
-
-    // Tabela de bônus diários
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS daily_bonuses (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        last_bonus DATETIME DEFAULT CURRENT_TIMESTAMP,
-        bonuses_today INTEGER DEFAULT 0,
-        FOREIGN KEY (user_id) REFERENCES users (id)
-      )
-    `);
-    console.log('✅ Tabela daily_bonuses criada/verificada');
-
-    // Tabela de histórico de jogos
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS game_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        bet_amount REAL NOT NULL,
-        win_amount REAL NOT NULL,
-        result TEXT NOT NULL,
-        cards TEXT,
-        dealer_cards TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id)
-      )
-    `);
-    console.log('✅ Tabela game_history criada/verificada');
-  } catch (err) {
-    console.error('❌ Erro ao criar tabelas:', err);
-  }
-}
-
-// ===== FUNÇÕES DO BANCO DE DADOS (better-sqlite3 - síncrono) =====
-
-function createUser(username, password) {
-  try {
-    const hashedPassword = bcrypt.hashSync(password, 10);
-    const stmt = db.prepare('INSERT INTO users (username, password, balance) VALUES (?, ?, ?)');
-    const result = stmt.run(username, hashedPassword, 1000);
-    return { id: result.lastInsertRowid, username, balance: 1000 };
-  } catch (err) {
-    console.error('Erro ao criar usuário:', err);
-    return null;
-  }
-}
-
-function getUser(username) {
-  try {
-    const stmt = db.prepare('SELECT * FROM users WHERE username = ?');
-    return stmt.get(username);
-  } catch (err) {
-    console.error('Erro ao buscar usuário:', err);
-    return null;
-  }
-}
-
-function updateBalance(username, newBalance) {
-  try {
-    const stmt = db.prepare('UPDATE users SET balance = ? WHERE username = ?');
-    stmt.run(newBalance, username);
-  } catch (err) {
-    console.error('Erro ao atualizar saldo:', err);
-  }
-}
-
-function updateLastLogin(username) {
-  try {
-    const stmt = db.prepare('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE username = ?');
-    stmt.run(username);
-  } catch (err) {
-    console.error('Erro ao atualizar login:', err);
-  }
-}
-
-function saveGameHistory(username, betAmount, winAmount, result, cards, dealerCards) {
-  try {
-    const user = getUser(username);
-    if (user) {
-      const stmt = db.prepare('INSERT INTO game_history (user_id, bet_amount, win_amount, result, cards, dealer_cards) VALUES (?, ?, ?, ?, ?, ?)');
-      stmt.run(user.id, betAmount, winAmount, result, JSON.stringify(cards), JSON.stringify(dealerCards));
-    }
-  } catch (err) {
-    console.error('Erro ao salvar histórico:', err);
-  }
-}
-
-function updateStats(username, won) {
-  try {
-    const stmt = db.prepare(`
-      UPDATE users 
-      SET total_games = total_games + 1,
-          total_wins = total_wins + ?,
-          total_losses = total_losses + ?
-      WHERE username = ?
-    `);
-    stmt.run(won ? 1 : 0, won ? 0 : 1, username);
-  } catch (err) {
-    console.error('Erro ao atualizar stats:', err);
-  }
-}
-
-function checkDailyBonus(username) {
-  try {
-    const user = getUser(username);
-    if (!user) return { canClaim: false, message: 'Usuário não encontrado' };
-    
-    const bonusStmt = db.prepare('SELECT * FROM daily_bonuses WHERE user_id = ?');
-    const bonus = bonusStmt.get(user.id);
-    
-    const now = Date.now();
-    const oneDay = 24 * 60 * 60 * 1000;
-    
-    if (!bonus) {
-      const insertStmt = db.prepare('INSERT INTO daily_bonuses (user_id, bonuses_today) VALUES (?, ?)');
-      insertStmt.run(user.id, 1);
-      return { canClaim: true, remaining: 2 };
-    }
-    
-    const lastBonus = new Date(bonus.last_bonus).getTime();
-    
-    if (now - lastBonus < oneDay) {
-      if (bonus.bonuses_today >= 3) {
-        const timeLeft = oneDay - (now - lastBonus);
-        const hours = Math.floor(timeLeft / (60 * 60 * 1000));
-        const minutes = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
-        return { canClaim: false, message: `Aguarde ${hours}h ${minutes}m` };
-      } else {
-        const updateStmt = db.prepare('UPDATE daily_bonuses SET bonuses_today = bonuses_today + 1, last_bonus = CURRENT_TIMESTAMP WHERE user_id = ?');
-        updateStmt.run(user.id);
-        return { canClaim: true, remaining: 2 - bonus.bonuses_today };
-      }
+    if (fs.existsSync(DB_FILE)) {
+      const data = fs.readFileSync(DB_FILE, 'utf8');
+      database = JSON.parse(data);
+      console.log('✅ Banco de dados carregado!');
     } else {
-      const updateStmt = db.prepare('UPDATE daily_bonuses SET bonuses_today = 1, last_bonus = CURRENT_TIMESTAMP WHERE user_id = ?');
-      updateStmt.run(user.id);
-      return { canClaim: true, remaining: 2 };
+      saveDatabase();
+      console.log('✅ Novo banco de dados criado!');
     }
   } catch (err) {
-    console.error('Erro ao verificar bônus:', err);
-    return { canClaim: false, message: 'Erro no servidor' };
+    console.error('❌ Erro ao carregar banco:', err);
   }
 }
+
+// Salvar banco de dados
+function saveDatabase() {
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(database, null, 2));
+  } catch (err) {
+    console.error('❌ Erro ao salvar banco:', err);
+  }
+}
+
+// Criar/Login usuário
+function authenticateUser(username, password) {
+  if (database.users[username]) {
+    // Usuário existe - verificar senha
+    if (bcrypt.compareSync(password, database.users[username].password)) {
+      database.users[username].lastLogin = new Date().toISOString();
+      saveDatabase();
+      return { success: true, user: database.users[username] };
+    } else {
+      return { success: false, message: 'Senha incorreta!' };
+    }
+  } else {
+    // Criar novo usuário
+    const hashedPassword = bcrypt.hashSync(password, 10);
+    database.users[username] = {
+      username: username,
+      password: hashedPassword,
+      balance: 1000,
+      totalWins: 0,
+      totalLosses: 0,
+      totalGames: 0,
+      createdAt: new Date().toISOString(),
+      lastLogin: new Date().toISOString()
+    };
+    saveDatabase();
+    console.log(`🆕 Novo usuário: ${username} com $1000`);
+    return { success: true, user: database.users[username] };
+  }
+}
+
+// Atualizar saldo
+function updateBalance(username, newBalance) {
+  if (database.users[username]) {
+    database.users[username].balance = newBalance;
+    saveDatabase();
+  }
+}
+
+// Atualizar estatísticas
+function updateStats(username, won) {
+  if (database.users[username]) {
+    database.users[username].totalGames++;
+    if (won) {
+      database.users[username].totalWins++;
+    } else {
+      database.users[username].totalLosses++;
+    }
+    saveDatabase();
+  }
+}
+
+// Salvar histórico
+function saveGameHistory(username, betAmount, winAmount, result, cards, dealerCards) {
+  database.gameHistory.push({
+    username: username,
+    betAmount: betAmount,
+    winAmount: winAmount,
+    result: result,
+    cards: cards,
+    dealerCards: dealerCards,
+    timestamp: new Date().toISOString()
+  });
+  
+  // Manter apenas últimas 1000 partidas
+  if (database.gameHistory.length > 1000) {
+    database.gameHistory = database.gameHistory.slice(-1000);
+  }
+  
+  saveDatabase();
+}
+
+// Bônus diário
+function checkDailyBonus(username) {
+  const now = Date.now();
+  const oneDay = 24 * 60 * 60 * 1000;
+  
+  if (!database.dailyBonuses[username]) {
+    database.dailyBonuses[username] = {
+      lastBonus: now,
+      bonusesToday: 1
+    };
+    saveDatabase();
+    return { canClaim: true, remaining: 2 };
+  }
+  
+  const bonus = database.dailyBonuses[username];
+  const timeSinceLastBonus = now - bonus.lastBonus;
+  
+  if (timeSinceLastBonus < oneDay) {
+    if (bonus.bonusesToday >= 3) {
+      const timeLeft = oneDay - timeSinceLastBonus;
+      const hours = Math.floor(timeLeft / (60 * 60 * 1000));
+      const minutes = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
+      return { canClaim: false, message: `Aguarde ${hours}h ${minutes}m` };
+    } else {
+      bonus.bonusesToday++;
+      bonus.lastBonus = now;
+      saveDatabase();
+      return { canClaim: true, remaining: 3 - bonus.bonusesToday };
+    }
+  } else {
+    // Novo dia
+    bonus.bonusesToday = 1;
+    bonus.lastBonus = now;
+    saveDatabase();
+    return { canClaim: true, remaining: 2 };
+  }
+}
+
+// Carregar banco ao iniciar
+loadDatabase();
 
 // ===== ESTADO DO JOGO =====
 let gameState = {
@@ -280,39 +254,22 @@ io.on('connection', (socket) => {
       return;
     }
     
-    const user = getUser(username);
+    const result = authenticateUser(username, password);
     
-    if (user) {
-      // Usuário existe - verificar senha
-      if (bcrypt.compareSync(password, user.password)) {
-        updateLastLogin(username);
-        console.log(`✅ Login bem-sucedido: ${username}, Saldo: ${user.balance}`);
-        socket.emit('loginSuccess', { 
-          username: user.username, 
-          balance: user.balance,
-          stats: {
-            totalGames: user.total_games,
-            totalWins: user.total_wins,
-            totalLosses: user.total_losses
-          }
-        });
-      } else {
-        console.log(`❌ Senha incorreta: ${username}`);
-        socket.emit('loginError', { message: 'Senha incorreta!' });
-      }
+    if (result.success) {
+      console.log(`✅ Login: ${username}, Saldo: $${result.user.balance}`);
+      socket.emit('loginSuccess', { 
+        username: result.user.username, 
+        balance: result.user.balance,
+        stats: {
+          totalGames: result.user.totalGames,
+          totalWins: result.user.totalWins,
+          totalLosses: result.user.totalLosses
+        }
+      });
     } else {
-      // Criar novo usuário
-      const newUser = createUser(username, password);
-      if (newUser) {
-        console.log(`🆕 Novo usuário: ${username} com $1000`);
-        socket.emit('loginSuccess', { 
-          username: newUser.username, 
-          balance: newUser.balance,
-          stats: { totalGames: 0, totalWins: 0, totalLosses: 0 }
-        });
-      } else {
-        socket.emit('loginError', { message: 'Erro ao criar usuário!' });
-      }
+      console.log(`❌ Login falhou: ${username}`);
+      socket.emit('loginError', { message: result.message });
     }
   });
   
@@ -327,64 +284,63 @@ io.on('connection', (socket) => {
       return;
     }
     
-    const user = getUser(username);
-    if (!user) return;
-    
-    const bonusAmount = 500;
-    const newBalance = user.balance + bonusAmount;
-    
-    updateBalance(username, newBalance);
-    
-    socket.emit('bonusSuccess', { 
-      amount: bonusAmount, 
-      newBalance: newBalance,
-      remaining: result.remaining
-    });
-    
-    // Atualizar jogador na mesa
-    const player = gameState.players.find(p => p.username === username);
-    if (player) {
-      player.balance = newBalance;
-      io.emit('gameState', gameState);
+    if (database.users[username]) {
+      const bonusAmount = 500;
+      const newBalance = database.users[username].balance + bonusAmount;
+      
+      updateBalance(username, newBalance);
+      
+      socket.emit('bonusSuccess', { 
+        amount: bonusAmount, 
+        newBalance: newBalance,
+        remaining: result.remaining
+      });
+      
+      const player = gameState.players.find(p => p.username === username);
+      if (player) {
+        player.balance = newBalance;
+        io.emit('gameState', gameState);
+      }
+      
+      console.log(`🎁 ${username} ganhou $${bonusAmount}. Saldo: $${newBalance}`);
     }
-    
-    console.log(`🎁 ${username} ganhou ${bonusAmount}. Novo saldo: ${newBalance}`);
   });
   
   // ADICIONAR JOGADOR
   socket.on('addPlayer', (data) => {
     if (gameState.players.length < 7 && gameState.status === 'lobby') {
-      const user = getUser(data.username);
-      if (!user) return;
-      
-      const player = {
-        id: socket.id,
-        name: data.name,
-        username: data.username,
-        balance: user.balance,
-        bet: 0,
-        cards: [],
-        splitHand: null,
-        total: 0,
-        splitTotal: 0,
-        busted: false,
-        splitBusted: false,
-        blackjack: false,
-        standing: false,
-        splitStanding: false,
-        result: null,
-        betPlaced: false,
-        doubled: false,
-        canSplit: false,
-        canDouble: false,
-        playingFirstHand: true,
-        lastWin: 0
-      };
-      
-      gameState.players.push(player);
-      io.emit('gameState', gameState);
-      io.emit('notification', { message: `${data.name} entrou!` });
-      console.log(`👤 ${data.name} entrou com ${user.balance}`);
+      if (database.users[data.username]) {
+        const user = database.users[data.username];
+        
+        const player = {
+          id: socket.id,
+          name: data.name,
+          username: data.username,
+          balance: user.balance,
+          bet: 0,
+          cards: [],
+          splitHand: null,
+          total: 0,
+          splitTotal: 0,
+          busted: false,
+          splitBusted: false,
+          blackjack: false,
+          standing: false,
+          splitStanding: false,
+          result: null,
+          lastWin: 0,
+          betPlaced: false,
+          doubled: false,
+          canSplit: false,
+          canDouble: false,
+          playingFirstHand: true
+        };
+        
+        gameState.players.push(player);
+        io.emit('gameState', gameState);
+        io.emit('notification', { message: `${data.name} entrou!` });
+        console.log(`👤 ${data.name} entrou com $${user.balance}`);
+      }
     }
   });
   
@@ -418,9 +374,7 @@ io.on('connection', (socket) => {
       });
       
       io.emit('gameState', gameState);
-      io.emit('notification', { message: '💰 30 segundos para apostar!' });
-      
-      console.log('🎲 Fase de apostas iniciada');
+      io.emit('notification', { message: '💰 30 segundos!' });
       
       if (gameState.bettingTimer) clearInterval(gameState.bettingTimer);
       
@@ -462,8 +416,6 @@ io.on('connection', (socket) => {
     if (player && gameState.status === 'betting' && !player.betPlaced) {
       const betAmount = parseInt(data.amount);
       
-      console.log(`💵 ${player.name} clicou na ficha de $${betAmount}`);
-      
       if (betAmount < 5 || betAmount > 500 || betAmount > player.balance || player.bet + betAmount > 500) {
         socket.emit('betError', { message: 'Aposta inválida!' });
         return;
@@ -471,8 +423,6 @@ io.on('connection', (socket) => {
       
       player.bet += betAmount;
       player.balance -= betAmount;
-      
-      console.log(`✅ ${player.name} apostou $${betAmount}. Total: $${player.bet}`);
       
       io.emit('gameState', gameState);
     }
@@ -486,7 +436,7 @@ io.on('connection', (socket) => {
       player.betPlaced = true;
       updateBalance(player.username, player.balance);
       io.emit('gameState', gameState);
-      io.emit('notification', { message: `✅ ${player.name} confirmou $${player.bet}!` });
+      io.emit('notification', { message: `✅ ${player.name} confirmou!` });
     }
   });
   
@@ -506,8 +456,6 @@ io.on('connection', (socket) => {
     
     gameState.status = 'playing';
     gameState.currentPlayer = 0;
-    
-    console.log('🎴 Distribuindo cartas...');
     
     gameState.players = gameState.players.map(p => {
       const card1 = gameState.deck.pop();
@@ -570,7 +518,6 @@ io.on('connection', (socket) => {
     }
   }
   
-  // HIT, STAND, SPLIT, DOUBLE (continuando...)
   socket.on('hit', () => {
     const currentPlayer = gameState.players[gameState.currentPlayer];
     
@@ -578,39 +525,15 @@ io.on('connection', (socket) => {
       const newCard = gameState.deck.pop();
       gameState.cardsUsed++;
       
-      if (currentPlayer.splitHand && currentPlayer.playingFirstHand) {
-        currentPlayer.cards.push(newCard);
-        currentPlayer.total = calculateTotal(currentPlayer.cards);
-        
-        if (currentPlayer.total > 21) {
-          currentPlayer.busted = true;
-          currentPlayer.playingFirstHand = false;
-          io.emit('gameState', gameState);
-        } else {
-          io.emit('gameState', gameState);
-        }
-      } else if (currentPlayer.splitHand && !currentPlayer.playingFirstHand) {
-        currentPlayer.splitHand.cards.push(newCard);
-        currentPlayer.splitTotal = calculateTotal(currentPlayer.splitHand.cards);
-        
-        if (currentPlayer.splitTotal > 21) {
-          currentPlayer.splitBusted = true;
-          io.emit('gameState', gameState);
-          setTimeout(() => nextPlayer(), gameState.roundSpeed);
-        } else {
-          io.emit('gameState', gameState);
-        }
+      currentPlayer.cards.push(newCard);
+      currentPlayer.total = calculateTotal(currentPlayer.cards);
+      
+      if (currentPlayer.total > 21) {
+        currentPlayer.busted = true;
+        io.emit('gameState', gameState);
+        setTimeout(() => nextPlayer(), gameState.roundSpeed);
       } else {
-        currentPlayer.cards.push(newCard);
-        currentPlayer.total = calculateTotal(currentPlayer.cards);
-        
-        if (currentPlayer.total > 21) {
-          currentPlayer.busted = true;
-          io.emit('gameState', gameState);
-          setTimeout(() => nextPlayer(), gameState.roundSpeed);
-        } else {
-          io.emit('gameState', gameState);
-        }
+        io.emit('gameState', gameState);
       }
     }
   });
@@ -619,14 +542,9 @@ io.on('connection', (socket) => {
     const currentPlayer = gameState.players[gameState.currentPlayer];
     
     if (currentPlayer && currentPlayer.id === socket.id) {
-      if (currentPlayer.splitHand && currentPlayer.playingFirstHand) {
-        currentPlayer.playingFirstHand = false;
-        io.emit('gameState', gameState);
-      } else {
-        currentPlayer.standing = true;
-        io.emit('gameState', gameState);
-        setTimeout(() => nextPlayer(), gameState.roundSpeed * 0.5);
-      }
+      currentPlayer.standing = true;
+      io.emit('gameState', gameState);
+      setTimeout(() => nextPlayer(), gameState.roundSpeed * 0.5);
     }
   });
   
@@ -651,7 +569,6 @@ io.on('connection', (socket) => {
       
       currentPlayer.canSplit = false;
       currentPlayer.canDouble = false;
-      currentPlayer.playingFirstHand = true;
       
       io.emit('gameState', gameState);
     }
@@ -724,14 +641,11 @@ io.on('connection', (socket) => {
   function determineWinners() {
     const dealerTotal = gameState.dealer.total;
     
-    console.log('🏆 Determinando vencedores...');
-    
     gameState.players = gameState.players.map(p => {
       let newBalance = p.balance;
       let result = '';
       let winAmount = 0;
       
-      // Primeira mão
       let firstHandWin = 0;
       if (p.busted) {
         firstHandWin = 0;
@@ -747,49 +661,25 @@ io.on('connection', (socket) => {
         firstHandWin = 0;
       }
       
-      // Segunda mão (split)
-      let secondHandWin = 0;
-      if (p.splitHand) {
-        if (p.splitBusted) {
-          secondHandWin = 0;
-        } else if (dealerTotal > 21) {
-          secondHandWin = p.bet * 2;
-        } else if (p.splitTotal > dealerTotal) {
-          secondHandWin = p.bet * 2;
-        } else if (p.splitTotal === dealerTotal) {
-          secondHandWin = p.bet;
-        } else {
-          secondHandWin = 0;
-        }
-      }
-      
-      const totalWin = firstHandWin + secondHandWin;
+      const totalWin = firstHandWin;
       newBalance += totalWin;
       
-      const betTotal = p.splitHand ? p.bet * 2 : p.bet;
-      const profit = totalWin - betTotal;
+      const profit = totalWin - p.bet;
       winAmount = profit;
       
-      if (p.splitHand) {
-        result = `M1: ${(firstHandWin - p.bet) >= 0 ? '+' : ''}$${firstHandWin - p.bet} | M2: ${(secondHandWin - p.bet) >= 0 ? '+' : ''}$${secondHandWin - p.bet}`;
+      if (profit > 0) {
+        result = p.blackjack ? `🎰 BLACKJACK! +$${profit}` : `✅ GANHOU +$${profit}`;
+      } else if (profit === 0 && !p.busted) {
+        result = `⚪ EMPATE`;
       } else {
-        if (profit > 0) {
-          result = p.blackjack ? `🎰 BLACKJACK! +$${profit}` : `✅ GANHOU +$${profit}`;
-        } else if (profit === 0 && !p.busted) {
-          result = `⚪ EMPATE (devolveu $${p.bet})`;
-        } else {
-          result = `❌ PERDEU -$${betTotal}`;
-        }
+        result = `❌ PERDEU -$${p.bet}`;
       }
       
-      // Salvar no banco de dados
       updateBalance(p.username, newBalance);
       updateStats(p.username, profit > 0);
-      saveGameHistory(p.username, betTotal, profit, result, p.cards, gameState.dealer.cards);
+      saveGameHistory(p.username, p.bet, profit, result, p.cards, gameState.dealer.cards);
       
-      console.log(`${p.name}: ${result} (Saldo: $${newBalance})`);
-      
-      return { ...p, balance: newBalance, result, lastWin: profit };
+      return { ...p, balance: newBalance, result, lastWin: Math.max(0, profit) };
     });
     
     gameState.status = 'finished';
@@ -810,3 +700,73 @@ io.on('connection', (socket) => {
         splitBusted: false,
         blackjack: false,
         standing: false,
+        splitStanding: false,
+        result: null,
+        doubled: false,
+        canSplit: false,
+        canDouble: false,
+        playingFirstHand: true
+      }));
+      
+      gameState.dealer = { cards: [], total: 0 };
+      gameState.currentPlayer = 0;
+      gameState.status = 'betting';
+      gameState.bettingTimeLeft = 30;
+      
+      if (needsShuffle()) {
+        gameState.deck = createDeck();
+        gameState.cardsUsed = 0;
+        io.emit('notification', { message: '🔀 Reembaralhado!' });
+      }
+      
+      io.emit('gameState', gameState);
+      io.emit('notification', { message: '💰 Nova rodada!' });
+      
+      if (gameState.bettingTimer) clearInterval(gameState.bettingTimer);
+      
+      gameState.bettingTimer = setInterval(() => {
+        gameState.bettingTimeLeft--;
+        io.emit('bettingTimer', { timeLeft: gameState.bettingTimeLeft });
+        
+        if (gameState.bettingTimeLeft <= 0) {
+          clearInterval(gameState.bettingTimer);
+          
+          const playersWhoBet = gameState.players.filter(p => p.betPlaced);
+          gameState.players = playersWhoBet;
+          
+          if (gameState.players.length > 0) {
+            setTimeout(() => startGame(), 2000);
+          } else {
+            gameState.status = 'lobby';
+            io.emit('gameState', gameState);
+          }
+        }
+      }, 1000);
+    }
+  });
+  
+  socket.on('leaveTable', () => {
+    const player = gameState.players.find(p => p.id === socket.id);
+    if (player) {
+      updateBalance(player.username, player.balance);
+      gameState.players = gameState.players.filter(p => p.id !== socket.id);
+      io.emit('gameState', gameState);
+      console.log(`🚪 ${player.name} saiu. Saldo: $${player.balance}`);
+    }
+  });
+  
+  socket.on('disconnect', () => {
+    const player = gameState.players.find(p => p.id === socket.id);
+    if (player) {
+      updateBalance(player.username, player.balance);
+      console.log(`❌ ${player.name} desconectou. Saldo: $${player.balance}`);
+    }
+    gameState.players = gameState.players.filter(p => p.id !== socket.id);
+    io.emit('gameState', gameState);
+  });
+});
+
+server.listen(PORT, () => {
+  console.log(`🎰 Servidor rodando na porta ${PORT}`);
+  console.log(`💾 Banco de dados: database.json`);
+});
