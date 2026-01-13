@@ -409,21 +409,38 @@ io.on('connection', (socket) => {
     }
   });
   
-  // APOSTAR
+  // APOSTAR - CORRIGIDO
   socket.on('placeBet', (data) => {
     const player = gameState.players.find(p => p.id === socket.id);
     
     if (player && gameState.status === 'betting' && !player.betPlaced) {
       const betAmount = parseInt(data.amount);
       
-      if (betAmount < 5 || betAmount > 500 || betAmount > player.balance || player.bet + betAmount > 500) {
-        socket.emit('betError', { message: 'Aposta inválida!' });
+      console.log(`🎲 ${player.name} tentando apostar $${betAmount}. Aposta atual: $${player.bet}, Saldo: $${player.balance}`);
+      
+      // Validações
+      if (isNaN(betAmount) || betAmount <= 0) {
+        socket.emit('betError', { message: 'Valor inválido!' });
         return;
       }
       
+      if (betAmount > player.balance) {
+        socket.emit('betError', { message: 'Saldo insuficiente!' });
+        return;
+      }
+      
+      if (player.bet + betAmount > 500) {
+        socket.emit('betError', { message: 'Aposta máxima: $500' });
+        return;
+      }
+      
+      // Adicionar valor à aposta
       player.bet += betAmount;
       player.balance -= betAmount;
       
+      console.log(`✅ Aposta adicionada! Nova aposta: $${player.bet}, Novo saldo: $${player.balance}`);
+      
+      // Enviar estado atualizado
       io.emit('gameState', gameState);
     }
   });
@@ -432,11 +449,17 @@ io.on('connection', (socket) => {
   socket.on('confirmBet', () => {
     const player = gameState.players.find(p => p.id === socket.id);
     
-    if (player && gameState.status === 'betting' && !player.betPlaced && player.bet >= 5) {
+    if (player && gameState.status === 'betting' && !player.betPlaced) {
+      if (player.bet < 5) {
+        socket.emit('betError', { message: 'Aposta mínima: $5' });
+        return;
+      }
+      
       player.betPlaced = true;
       updateBalance(player.username, player.balance);
       io.emit('gameState', gameState);
-      io.emit('notification', { message: `✅ ${player.name} confirmou!` });
+      io.emit('notification', { message: `✅ ${player.name} confirmou $${player.bet}!` });
+      console.log(`✅ ${player.name} confirmou aposta de $${player.bet}`);
     }
   });
   
@@ -445,6 +468,7 @@ io.on('connection', (socket) => {
     const player = gameState.players.find(p => p.id === socket.id);
     
     if (player && gameState.status === 'betting' && !player.betPlaced) {
+      console.log(`🧹 ${player.name} limpou aposta de $${player.bet}`);
       player.balance += player.bet;
       player.bet = 0;
       io.emit('gameState', gameState);
