@@ -1,535 +1,663 @@
-import React, { useState, useEffect } from 'react';
-import { Play, Plus, Minus, RefreshCw, LogOut } from 'lucide-react';
+// server.js - BACKEND PURO (SEM JSX)
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const fs = require('fs');
+const path = require('path');
+const bcrypt = require('bcryptjs');
 
-export default function BlackjackGame() {
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [playerName, setPlayerName] = useState('');
-  const [balance, setBalance] = useState(1000);
-  const [currentBet, setCurrentBet] = useState(0);
-  const [betConfirmed, setBetConfirmed] = useState(false);
-  const [gameStatus, setGameStatus] = useState('lobby'); // lobby, betting, playing, finished
-  const [timer, setTimer] = useState(30);
-  const [playerCards, setPlayerCards] = useState([]);
-  const [dealerCards, setDealerCards] = useState([]);
-  const [playerTotal, setPlayerTotal] = useState(0);
-  const [dealerTotal, setDealerTotal] = useState(0);
-  const [message, setMessage] = useState('');
-  const [isPlayerTurn, setIsPlayerTurn] = useState(false);
-  const [gameResult, setGameResult] = useState('');
+const app = express();
+const server = http.createServer(app);
+const io = socketIo(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
 
-  // Simular timer de apostas
-  useEffect(() => {
-    if (gameStatus === 'betting' && timer > 0) {
-      const interval = setInterval(() => {
-        setTimer(prev => {
-          if (prev <= 1) {
-            if (betConfirmed) {
-              startGame();
-            } else {
-              setGameStatus('lobby');
-              setCurrentBet(0);
-              showMessage('Tempo esgotado!');
+const PORT = process.env.PORT || 3000;
+
+// Servir arquivos estáticos da pasta 'public'
+app.use(express.static('public'));
+
+// ===== BANCO DE DADOS JSON =====
+const DB_FILE = path.join(__dirname, 'database.json');
+
+let database = {
+  users: {},
+  dailyBonuses: {},
+  gameHistory: []
+};
+
+function loadDatabase() {
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      const data = fs.readFileSync(DB_FILE, 'utf8');
+      database = JSON.parse(data);
+      console.log('✅ Banco de dados carregado!');
+    } else {
+      saveDatabase();
+      console.log('✅ Novo banco de dados criado!');
+    }
+  } catch (err) {
+    console.error('❌ Erro ao carregar banco:', err);
+  }
+}
+
+function saveDatabase() {
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(database, null, 2));
+  } catch (err) {
+    console.error('❌ Erro ao salvar banco:', err);
+  }
+}
+
+function authenticateUser(username, password) {
+  if (database.users[username]) {
+    if (bcrypt.compareSync(password, database.users[username].password)) {
+      database.users[username].lastLogin = new Date().toISOString();
+      saveDatabase();
+      return { success: true, user: database.users[username] };
+    } else {
+      return { success: false, message: 'Senha incorreta!' };
+    }
+  } else {
+    const hashedPassword = bcrypt.hashSync(password, 10);
+    database.users[username] = {
+      username: username,
+      password: hashedPassword,
+      balance: 1000,
+      totalWins: 0,
+      totalLosses: 0,
+      totalGames: 0,
+      createdAt: new Date().toISOString(),
+      lastLogin: new Date().toISOString()
+    };
+    saveDatabase();
+    console.log(`🆕 Novo usuário: ${username} com $1000`);
+    return { success: true, user: database.users[username] };
+  }
+}
+
+function updateBalance(username, newBalance) {
+  if (database.users[username]) {
+    database.users[username].balance = newBalance;
+    saveDatabase();
+  }
+}
+
+function updateStats(username, won) {
+  if (database.users[username]) {
+    database.users[username].totalGames++;
+    if (won) {
+      database.users[username].totalWins++;
+    } else {
+      database.users[username].totalLosses++;
+    }
+    saveDatabase();
+  }
+}
+
+function checkDailyBonus(username) {
+  const now = Date.now();
+  const oneDay = 24 * 60 * 60 * 1000;
+  
+  if (!database.dailyBonuses[username]) {
+    database.dailyBonuses[username] = {
+      lastBonus: now,
+      bonusesToday: 1
+    };
+    saveDatabase();
+    return { canClaim: true, remaining: 2 };
+  }
+  
+  const bonus = database.dailyBonuses[username];
+  const timeSinceLastBonus = now - bonus.lastBonus;
+  
+  if (timeSinceLastBonus < oneDay) {
+    if (bonus.bonusesToday >= 3) {
+      const timeLeft = oneDay - timeSinceLastBonus;
+      const hours = Math.floor(timeLeft / (60 * 60 * 1000));
+      const minutes = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
+      return { canClaim: false, message: `Aguarde ${hours}h ${minutes}m` };
+    } else {
+      bonus.bonusesToday++;
+      bonus.lastBonus = now;
+      saveDatabase();
+      return { canClaim: true, remaining: 3 - bonus.bonusesToday };
+    }
+  } else {
+    bonus.bonusesToday = 1;
+    bonus.lastBonus = now;
+    saveDatabase();
+    return { canClaim: true, remaining: 2 };
+  }
+}
+
+loadDatabase();
+
+// ===== ESTADO DO JOGO =====
+let gameState = {
+  players: [],
+  dealer: { cards: [], total: 0 },
+  deck: [],
+  totalCards: 312,
+  cardsUsed: 0,
+  currentPlayer: 0,
+  status: 'lobby',
+  roundSpeed: 2000,
+  bettingTimeLeft: 0,
+  bettingTimer: null
+};
+
+function createDeck() {
+  const suits = ['hearts', 'diamonds', 'clubs', 'spades'];
+  const values = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+  const deck = [];
+  
+  for (let i = 0; i < 6; i++) {
+    suits.forEach(suit => {
+      values.forEach(value => {
+        deck.push({ suit, value, hidden: false });
+      });
+    });
+  }
+  
+  return deck.sort(() => Math.random() - 0.5);
+}
+
+function needsShuffle() {
+  return gameState.cardsUsed >= (gameState.totalCards * 0.5);
+}
+
+function calculateTotal(cards) {
+  let total = 0;
+  let aces = 0;
+  
+  cards.filter(c => !c.hidden).forEach(card => {
+    if (card.value === 'A') {
+      aces++;
+      total += 11;
+    } else if (['J', 'Q', 'K'].includes(card.value)) {
+      total += 10;
+    } else {
+      total += parseInt(card.value);
+    }
+  });
+  
+  while (total > 21 && aces > 0) {
+    total -= 10;
+    aces--;
+  }
+  
+  return total;
+}
+
+function canSplit(player) {
+  if (player.cards.length !== 2) return false;
+  const card1 = player.cards[0].value;
+  const card2 = player.cards[1].value;
+  
+  if (card1 === card2) return true;
+  
+  const figures = ['J', 'Q', 'K', '10'];
+  if (figures.includes(card1) && figures.includes(card2)) return true;
+  
+  return false;
+}
+
+// ===== SOCKET.IO =====
+io.on('connection', (socket) => {
+  console.log('✅ Jogador conectado:', socket.id);
+  
+  socket.emit('gameState', gameState);
+  
+  socket.on('login', (data) => {
+    const { username, password } = data;
+    
+    if (!username || !password) {
+      socket.emit('loginError', { message: 'Usuário e senha obrigatórios!' });
+      return;
+    }
+    
+    const result = authenticateUser(username, password);
+    
+    if (result.success) {
+      socket.emit('loginSuccess', { 
+        username: result.user.username, 
+        balance: result.user.balance,
+        stats: {
+          totalGames: result.user.totalGames,
+          totalWins: result.user.totalWins,
+          totalLosses: result.user.totalLosses
+        }
+      });
+    } else {
+      socket.emit('loginError', { message: result.message });
+    }
+  });
+  
+  socket.on('claimDailyBonus', (data) => {
+    const { username } = data;
+    const result = checkDailyBonus(username);
+    
+    if (!result.canClaim) {
+      socket.emit('bonusError', { message: result.message });
+      return;
+    }
+    
+    if (database.users[username]) {
+      const bonusAmount = 500;
+      const newBalance = database.users[username].balance + bonusAmount;
+      
+      updateBalance(username, newBalance);
+      
+      socket.emit('bonusSuccess', { 
+        amount: bonusAmount, 
+        newBalance: newBalance,
+        remaining: result.remaining
+      });
+      
+      const player = gameState.players.find(p => p.username === username);
+      if (player) {
+        player.balance = newBalance;
+        io.emit('gameState', gameState);
+      }
+    }
+  });
+  
+  socket.on('addPlayer', (data) => {
+    if (gameState.players.length < 7 && gameState.status === 'lobby') {
+      if (database.users[data.username]) {
+        const user = database.users[data.username];
+        
+        const player = {
+          id: socket.id,
+          name: data.name,
+          username: data.username,
+          balance: user.balance,
+          bet: 0,
+          cards: [],
+          total: 0,
+          busted: false,
+          blackjack: false,
+          standing: false,
+          result: null,
+          lastWin: 0,
+          betPlaced: false,
+          canSplit: false,
+          canDouble: false
+        };
+        
+        gameState.players.push(player);
+        io.emit('gameState', gameState);
+        io.emit('notification', { message: `${data.name} entrou!` });
+      }
+    }
+  });
+  
+  socket.on('startBetting', () => {
+    if (gameState.players.length > 0 && gameState.status === 'lobby') {
+      if (gameState.deck.length === 0 || needsShuffle()) {
+        gameState.deck = createDeck();
+        gameState.cardsUsed = 0;
+      }
+      
+      gameState.status = 'betting';
+      gameState.bettingTimeLeft = 30;
+      
+      gameState.players.forEach(p => {
+        p.bet = 0;
+        p.betPlaced = false;
+        p.cards = [];
+        p.busted = false;
+        p.blackjack = false;
+        p.standing = false;
+        p.result = null;
+        p.canSplit = false;
+        p.canDouble = false;
+      });
+      
+      io.emit('gameState', gameState);
+      
+      if (gameState.bettingTimer) clearInterval(gameState.bettingTimer);
+      
+      gameState.bettingTimer = setInterval(() => {
+        gameState.bettingTimeLeft--;
+        io.emit('bettingTimer', { timeLeft: gameState.bettingTimeLeft });
+        
+        if (gameState.bettingTimeLeft <= 0) {
+          clearInterval(gameState.bettingTimer);
+          
+          const playersWhoBet = gameState.players.filter(p => p.betPlaced);
+          const playersWhoDidnt = gameState.players.filter(p => !p.betPlaced);
+          
+          playersWhoDidnt.forEach(p => {
+            if (p.bet > 0) {
+              p.balance += p.bet;
+              updateBalance(p.username, p.balance);
+              p.bet = 0;
             }
-            return 30;
+          });
+          
+          gameState.players = playersWhoBet;
+          
+          if (gameState.players.length > 0) {
+            setTimeout(() => startGame(), 2000);
+          } else {
+            gameState.status = 'lobby';
+            io.emit('gameState', gameState);
           }
-          return prev - 1;
-        });
+        }
       }, 1000);
-      return () => clearInterval(interval);
     }
-  }, [gameStatus, timer, betConfirmed]);
-
-  const showMessage = (msg) => {
-    setMessage(msg);
-    setTimeout(() => setMessage(''), 3000);
-  };
-
-  const handleLogin = () => {
-    if (username && password) {
-      setIsLoggedIn(true);
-      showMessage('Login bem-sucedido! Saldo: $1000');
-    }
-  };
-
-  const handleJoinTable = () => {
-    if (playerName) {
-      setGameStatus('lobby');
-      showMessage(`${playerName} entrou na mesa!`);
-    }
-  };
-
-  const startBetting = () => {
-    setGameStatus('betting');
-    setTimer(30);
-    setCurrentBet(0);
-    setBetConfirmed(false);
-    setPlayerCards([]);
-    setDealerCards([]);
-    setGameResult('');
-    showMessage('Faça suas apostas! 30 segundos');
-  };
-
-  const placeBet = (amount) => {
-    if (betConfirmed) {
-      showMessage('Aposta já confirmada!');
-      return;
-    }
+  });
+  
+  socket.on('placeBet', (data) => {
+    const player = gameState.players.find(p => p.id === socket.id);
     
-    if (currentBet + amount > balance) {
-      showMessage('Saldo insuficiente!');
-      return;
+    if (player && gameState.status === 'betting' && !player.betPlaced) {
+      const betAmount = parseInt(data.amount);
+      
+      if (isNaN(betAmount) || betAmount <= 0) {
+        socket.emit('betError', { message: 'Valor inválido!' });
+        return;
+      }
+      
+      if (betAmount > player.balance) {
+        socket.emit('betError', { message: 'Saldo insuficiente!' });
+        return;
+      }
+      
+      if (player.bet + betAmount > 500) {
+        socket.emit('betError', { message: 'Aposta máxima: $500' });
+        return;
+      }
+      
+      player.bet += betAmount;
+      player.balance -= betAmount;
+      
+      io.emit('gameState', gameState);
     }
+  });
+  
+  socket.on('confirmBet', () => {
+    const player = gameState.players.find(p => p.id === socket.id);
     
-    if (currentBet + amount > 500) {
-      showMessage('Aposta máxima: $500');
-      return;
+    if (player && gameState.status === 'betting' && !player.betPlaced) {
+      if (player.bet < 5) {
+        socket.emit('betError', { message: 'Aposta mínima: $5' });
+        return;
+      }
+      
+      player.betPlaced = true;
+      updateBalance(player.username, player.balance);
+      io.emit('gameState', gameState);
+      io.emit('notification', { message: `✅ ${player.name} confirmou!` });
     }
+  });
+  
+  socket.on('clearBet', () => {
+    const player = gameState.players.find(p => p.id === socket.id);
     
-    setCurrentBet(prev => prev + amount);
-    showMessage(`+$${amount} adicionado`);
-  };
-
-  const confirmBet = () => {
-    if (currentBet < 5) {
-      showMessage('Aposta mínima: $5');
-      return;
+    if (player && gameState.status === 'betting' && !player.betPlaced) {
+      player.balance += player.bet;
+      player.bet = 0;
+      io.emit('gameState', gameState);
     }
+  });
+  
+  function startGame() {
+    gameState.status = 'playing';
+    gameState.currentPlayer = 0;
     
-    setBalance(prev => prev - currentBet);
-    setBetConfirmed(true);
-    showMessage(`Aposta confirmada: $${currentBet}`);
-  };
-
-  const clearBet = () => {
-    if (!betConfirmed) {
-      setCurrentBet(0);
-      showMessage('Aposta limpa');
-    }
-  };
-
-  const createCard = (value, suit) => ({ value, suit });
-
-  const getCardValue = (card) => {
-    if (card.value === 'A') return 11;
-    if (['J', 'Q', 'K'].includes(card.value)) return 10;
-    return parseInt(card.value);
-  };
-
-  const calculateTotal = (cards) => {
-    let total = 0;
-    let aces = 0;
-    
-    cards.forEach(card => {
-      if (card.hidden) return;
-      const value = getCardValue(card);
-      total += value;
-      if (card.value === 'A') aces++;
+    gameState.players.forEach(p => {
+      const card1 = gameState.deck.pop();
+      const card2 = gameState.deck.pop();
+      gameState.cardsUsed += 2;
+      
+      p.cards = [card1, card2];
+      p.total = calculateTotal(p.cards);
+      p.blackjack = p.total === 21;
+      p.canSplit = canSplit(p) && p.balance >= p.bet;
+      p.canDouble = p.balance >= p.bet;
+      
+      if (p.blackjack) {
+        p.standing = true;
+      }
     });
     
-    while (total > 21 && aces > 0) {
-      total -= 10;
-      aces--;
+    const dealerCard1 = gameState.deck.pop();
+    const dealerCard2 = { ...gameState.deck.pop(), hidden: true };
+    gameState.cardsUsed += 2;
+    
+    gameState.dealer = {
+      cards: [dealerCard1, dealerCard2],
+      total: calculateTotal([dealerCard1])
+    };
+    
+    io.emit('gameState', gameState);
+    
+    setTimeout(() => skipBlackjackPlayers(), 500);
+  }
+  
+  function skipBlackjackPlayers() {
+    while (gameState.currentPlayer < gameState.players.length && 
+           gameState.players[gameState.currentPlayer].blackjack) {
+      gameState.currentPlayer++;
     }
     
-    return total;
-  };
-
-  const getRandomCard = () => {
-    const values = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
-    const suits = ['♥', '♦', '♣', '♠'];
-    return createCard(
-      values[Math.floor(Math.random() * values.length)],
-      suits[Math.floor(Math.random() * suits.length)]
-    );
-  };
-
-  const startGame = () => {
-    setGameStatus('playing');
-    
-    // Distribuir cartas
-    const pCards = [getRandomCard(), getRandomCard()];
-    const dCards = [getRandomCard(), { ...getRandomCard(), hidden: true }];
-    
-    setPlayerCards(pCards);
-    setDealerCards(dCards);
-    
-    const pTotal = calculateTotal(pCards);
-    const dTotal = calculateTotal([dCards[0]]);
-    
-    setPlayerTotal(pTotal);
-    setDealerTotal(dTotal);
-    
-    if (pTotal === 21) {
-      endGame('blackjack');
+    if (gameState.currentPlayer >= gameState.players.length) {
+      dealerPlay();
     } else {
-      setIsPlayerTurn(true);
-      showMessage('Sua vez! Pedir ou Parar?');
+      io.emit('gameState', gameState);
     }
-  };
-
-  const hit = () => {
-    const newCard = getRandomCard();
-    const newCards = [...playerCards, newCard];
-    setPlayerCards(newCards);
+  }
+  
+  socket.on('hit', () => {
+    const currentPlayer = gameState.players[gameState.currentPlayer];
     
-    const total = calculateTotal(newCards);
-    setPlayerTotal(total);
-    
-    if (total > 21) {
-      setIsPlayerTurn(false);
-      endGame('bust');
-    } else if (total === 21) {
-      stand();
+    if (currentPlayer && currentPlayer.id === socket.id) {
+      const newCard = gameState.deck.pop();
+      gameState.cardsUsed++;
+      
+      currentPlayer.cards.push(newCard);
+      currentPlayer.total = calculateTotal(currentPlayer.cards);
+      
+      if (currentPlayer.total > 21) {
+        currentPlayer.busted = true;
+        io.emit('gameState', gameState);
+        setTimeout(() => nextPlayer(), gameState.roundSpeed);
+      } else {
+        io.emit('gameState', gameState);
+      }
     }
-  };
-
-  const stand = () => {
-    setIsPlayerTurn(false);
+  });
+  
+  socket.on('stand', () => {
+    const currentPlayer = gameState.players[gameState.currentPlayer];
     
-    // Revelar carta escondida do dealer
-    const revealedCards = dealerCards.map(c => ({ ...c, hidden: false }));
-    setDealerCards(revealedCards);
+    if (currentPlayer && currentPlayer.id === socket.id) {
+      currentPlayer.standing = true;
+      io.emit('gameState', gameState);
+      setTimeout(() => nextPlayer(), gameState.roundSpeed * 0.5);
+    }
+  });
+  
+  socket.on('double', () => {
+    const currentPlayer = gameState.players[gameState.currentPlayer];
     
-    let dTotal = calculateTotal(revealedCards);
-    setDealerTotal(dTotal);
+    if (currentPlayer && currentPlayer.id === socket.id && currentPlayer.canDouble) {
+      currentPlayer.balance -= currentPlayer.bet;
+      currentPlayer.bet *= 2;
+      updateBalance(currentPlayer.username, currentPlayer.balance);
+      
+      const newCard = gameState.deck.pop();
+      gameState.cardsUsed++;
+      currentPlayer.cards.push(newCard);
+      currentPlayer.total = calculateTotal(currentPlayer.cards);
+      
+      if (currentPlayer.total > 21) {
+        currentPlayer.busted = true;
+      }
+      
+      currentPlayer.standing = true;
+      io.emit('gameState', gameState);
+      setTimeout(() => nextPlayer(), gameState.roundSpeed);
+    }
+  });
+  
+  function nextPlayer() {
+    let next = gameState.currentPlayer + 1;
     
-    // Dealer pega cartas até 17
+    while (next < gameState.players.length && 
+           (gameState.players[next].standing || 
+            gameState.players[next].busted || 
+            gameState.players[next].blackjack)) {
+      next++;
+    }
+    
+    if (next < gameState.players.length) {
+      gameState.currentPlayer = next;
+      io.emit('gameState', gameState);
+    } else {
+      dealerPlay();
+    }
+  }
+  
+  function dealerPlay() {
+    gameState.dealer.cards = gameState.dealer.cards.map(c => ({ ...c, hidden: false }));
+    gameState.dealer.total = calculateTotal(gameState.dealer.cards);
+    io.emit('gameState', gameState);
+    
     setTimeout(() => {
-      dealerPlay(revealedCards, dTotal);
-    }, 1000);
-  };
-
-  const dealerPlay = (cards, total) => {
-    if (total < 17) {
-      const newCard = getRandomCard();
-      const newCards = [...cards, newCard];
-      setDealerCards(newCards);
-      
-      const newTotal = calculateTotal(newCards);
-      setDealerTotal(newTotal);
-      
-      setTimeout(() => dealerPlay(newCards, newTotal), 1000);
-    } else {
-      determineWinner(total);
-    }
-  };
-
-  const determineWinner = (dTotal) => {
-    const pTotal = playerTotal;
-    let result = '';
-    let winAmount = 0;
-    
-    if (pTotal > 21) {
-      result = `❌ PERDEU -$${currentBet}`;
-    } else if (dTotal > 21) {
-      result = `✅ GANHOU +$${currentBet}`;
-      winAmount = currentBet * 2;
-    } else if (pTotal > dTotal) {
-      result = `✅ GANHOU +$${currentBet}`;
-      winAmount = currentBet * 2;
-    } else if (pTotal === dTotal) {
-      result = `⚪ EMPATE`;
-      winAmount = currentBet;
-    } else {
-      result = `❌ PERDEU -$${currentBet}`;
-    }
-    
-    setBalance(prev => prev + winAmount);
-    setGameResult(result);
-    setGameStatus('finished');
-    showMessage(result);
-  };
-
-  const endGame = (type) => {
-    if (type === 'blackjack') {
-      const winAmount = Math.floor(currentBet * 2.5);
-      setBalance(prev => prev + winAmount);
-      setGameResult(`🎰 BLACKJACK! +$${winAmount - currentBet}`);
-      showMessage('BLACKJACK!');
-    } else if (type === 'bust') {
-      setGameResult(`❌ ESTOUROU! -$${currentBet}`);
-      showMessage('Você estourou!');
-    }
-    setGameStatus('finished');
-  };
-
-  const newRound = () => {
-    startBetting();
-  };
-
-  // Renderizar carta
-  const renderCard = (card, index) => {
-    if (card.hidden) {
-      return (
-        <div key={index} className="w-16 h-24 bg-gradient-to-br from-red-800 to-red-900 rounded-lg border-2 border-yellow-500 flex items-center justify-center">
-          <div className="text-yellow-500 text-2xl">?</div>
-        </div>
-      );
-    }
-    
-    const isRed = card.suit === '♥' || card.suit === '♦';
-    return (
-      <div key={index} className="w-16 h-24 bg-white rounded-lg border-2 border-gray-300 flex flex-col items-center justify-between p-2">
-        <span className={`text-lg font-bold ${isRed ? 'text-red-600' : 'text-gray-900'}`}>
-          {card.value}
-        </span>
-        <span className={`text-2xl ${isRed ? 'text-red-600' : 'text-gray-900'}`}>
-          {card.suit}
-        </span>
-        <span className={`text-lg font-bold ${isRed ? 'text-red-600' : 'text-gray-900'}`}>
-          {card.value}
-        </span>
-      </div>
-    );
-  };
-
-  // LOGIN SCREEN
-  if (!isLoggedIn) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-green-800 to-green-900 flex items-center justify-center p-4">
-        <div className="bg-gray-900 p-8 rounded-2xl border-4 border-yellow-500 max-w-md w-full">
-          <h1 className="text-4xl font-bold text-yellow-500 text-center mb-8">🎰 BLACKJACK</h1>
-          <input
-            type="text"
-            placeholder="Usuário"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            className="w-full p-4 mb-4 bg-gray-800 text-white rounded-lg border-2 border-gray-700 focus:border-yellow-500 outline-none"
-          />
-          <input
-            type="password"
-            placeholder="Senha"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
-            className="w-full p-4 mb-6 bg-gray-800 text-white rounded-lg border-2 border-gray-700 focus:border-yellow-500 outline-none"
-          />
-          <button
-            onClick={handleLogin}
-            className="w-full p-4 bg-green-600 hover:bg-green-700 text-white font-bold rounded-lg text-xl transition-all"
-          >
-            ENTRAR
-          </button>
-          <p className="text-gray-400 text-center mt-4 text-sm">Novo jogador? Será criado com $1000</p>
-        </div>
-      </div>
-    );
+      const dealerInterval = setInterval(() => {
+        if (gameState.dealer.total < 17) {
+          const newCard = gameState.deck.pop();
+          gameState.cardsUsed++;
+          
+          gameState.dealer.cards.push(newCard);
+          gameState.dealer.total = calculateTotal(gameState.dealer.cards);
+          io.emit('gameState', gameState);
+        } else {
+          clearInterval(dealerInterval);
+          setTimeout(() => determineWinners(), gameState.roundSpeed);
+        }
+      }, gameState.roundSpeed);
+    }, gameState.roundSpeed);
   }
-
-  // JOIN TABLE SCREEN
-  if (!playerName) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-green-800 to-green-900">
-        <div className="bg-gray-900 p-4 border-b-4 border-yellow-500 flex justify-between items-center">
-          <h1 className="text-2xl font-bold text-yellow-500">BLACKJACK</h1>
-          <span className="text-white">👤 {username}</span>
-        </div>
-        <div className="flex items-center justify-center min-h-[calc(100vh-80px)] p-4">
-          <div className="bg-gray-900 p-8 rounded-2xl border-4 border-yellow-500 max-w-md w-full">
-            <h2 className="text-3xl font-bold text-yellow-500 text-center mb-8">ENTRAR NA MESA</h2>
-            <input
-              type="text"
-              placeholder="Seu apelido na mesa"
-              value={playerName}
-              onChange={(e) => setPlayerName(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && handleJoinTable()}
-              className="w-full p-4 mb-6 bg-gray-800 text-white rounded-lg border-2 border-gray-700 focus:border-yellow-500 outline-none"
-            />
-            <button
-              onClick={handleJoinTable}
-              className="w-full p-4 bg-green-600 hover:bg-green-700 text-white font-bold rounded-lg text-xl transition-all"
-            >
-              ENTRAR
-            </button>
-          </div>
-        </div>
-      </div>
-    );
+  
+  function determineWinners() {
+    const dealerTotal = gameState.dealer.total;
+    
+    gameState.players.forEach(p => {
+      let newBalance = p.balance;
+      let winAmount = 0;
+      
+      if (p.busted) {
+        winAmount = 0;
+      } else if (p.blackjack && dealerTotal !== 21) {
+        winAmount = p.bet + Math.floor(p.bet * 1.5);
+      } else if (dealerTotal > 21) {
+        winAmount = p.bet * 2;
+      } else if (p.total > dealerTotal) {
+        winAmount = p.bet * 2;
+      } else if (p.total === dealerTotal) {
+        winAmount = p.bet;
+      }
+      
+      newBalance += winAmount;
+      const profit = winAmount - p.bet;
+      
+      if (profit > 0) {
+        p.result = p.blackjack ? `🎰 BLACKJACK! +$${profit}` : `✅ GANHOU +$${profit}`;
+      } else if (profit === 0 && !p.busted) {
+        p.result = `⚪ EMPATE`;
+      } else {
+        p.result = `❌ PERDEU -$${p.bet}`;
+      }
+      
+      p.balance = newBalance;
+      p.lastWin = Math.max(0, profit);
+      
+      updateBalance(p.username, newBalance);
+      updateStats(p.username, profit > 0);
+    });
+    
+    gameState.status = 'finished';
+    io.emit('gameState', gameState);
   }
+  
+  socket.on('newRound', () => {
+    if (gameState.status === 'finished') {
+      gameState.players.forEach(p => {
+        p.bet = 0;
+        p.betPlaced = false;
+        p.cards = [];
+        p.total = 0;
+        p.busted = false;
+        p.blackjack = false;
+        p.standing = false;
+        p.result = null;
+        p.canSplit = false;
+        p.canDouble = false;
+      });
+      
+      gameState.dealer = { cards: [], total: 0 };
+      gameState.currentPlayer = 0;
+      gameState.status = 'betting';
+      gameState.bettingTimeLeft = 30;
+      
+      if (needsShuffle()) {
+        gameState.deck = createDeck();
+        gameState.cardsUsed = 0;
+      }
+      
+      io.emit('gameState', gameState);
+      
+      if (gameState.bettingTimer) clearInterval(gameState.bettingTimer);
+      
+      gameState.bettingTimer = setInterval(() => {
+        gameState.bettingTimeLeft--;
+        io.emit('bettingTimer', { timeLeft: gameState.bettingTimeLeft });
+        
+        if (gameState.bettingTimeLeft <= 0) {
+          clearInterval(gameState.bettingTimer);
+          
+          const playersWhoBet = gameState.players.filter(p => p.betPlaced);
+          gameState.players = playersWhoBet;
+          
+          if (gameState.players.length > 0) {
+            setTimeout(() => startGame(), 2000);
+          } else {
+            gameState.status = 'lobby';
+            io.emit('gameState', gameState);
+          }
+        }
+      }, 1000);
+    }
+  });
+  
+  socket.on('leaveTable', () => {
+    const player = gameState.players.find(p => p.id === socket.id);
+    if (player) {
+      updateBalance(player.username, player.balance);
+      gameState.players = gameState.players.filter(p => p.id !== socket.id);
+      io.emit('gameState', gameState);
+    }
+  });
+  
+  socket.on('disconnect', () => {
+    const player = gameState.players.find(p => p.id === socket.id);
+    if (player) {
+      updateBalance(player.username, player.balance);
+    }
+    gameState.players = gameState.players.filter(p => p.id !== socket.id);
+    io.emit('gameState', gameState);
+  });
+});
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-green-800 to-green-900">
-      {/* Header */}
-      <div className="bg-gray-900 p-4 border-b-4 border-yellow-500 flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-yellow-500">BLACKJACK</h1>
-        <div className="flex gap-4 items-center">
-          <span className="text-white">👤 {username}</span>
-          {gameStatus === 'lobby' && (
-            <button
-              onClick={() => setPlayerName('')}
-              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg transition-all"
-            >
-              SAIR
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Notification */}
-      {message && (
-        <div className="fixed top-20 right-4 bg-yellow-500 text-gray-900 px-6 py-3 rounded-lg font-bold shadow-lg z-50 animate-pulse">
-          {message}
-        </div>
-      )}
-
-      <div className="container mx-auto p-4 pb-32">
-        {/* LOBBY */}
-        {gameStatus === 'lobby' && (
-          <div className="text-center py-20">
-            <h2 className="text-4xl font-bold text-yellow-500 mb-8">MESA DE BLACKJACK</h2>
-            <div className="bg-gray-900 p-8 rounded-2xl border-4 border-yellow-500 inline-block">
-              <div className="text-white text-2xl mb-6">
-                <div className="mb-2">Jogador: <span className="text-yellow-500 font-bold">{playerName}</span></div>
-                <div>Saldo: <span className="text-green-500 font-bold">${balance}</span></div>
-              </div>
-            </div>
-            <button
-              onClick={startBetting}
-              className="mt-8 px-12 py-6 bg-green-600 hover:bg-green-700 text-white font-bold rounded-lg text-3xl transition-all flex items-center gap-3 mx-auto"
-            >
-              <Play size={32} /> INICIAR RODADA
-            </button>
-          </div>
-        )}
-
-        {/* BETTING */}
-        {gameStatus === 'betting' && (
-          <div className="text-center py-10">
-            <div className="bg-red-600 text-white text-4xl font-bold py-4 px-8 rounded-lg inline-block mb-8">
-              {timer}s
-            </div>
-
-            <div className="flex gap-6 justify-center mb-8">
-              <div className="w-20 h-20 bg-red-600 hover:bg-red-700 rounded-full border-4 border-white flex items-center justify-center text-white font-bold text-xl cursor-pointer transition-all hover:scale-110 active:scale-95"
-                   onClick={() => placeBet(5)}>
-                $5
-              </div>
-              <div className="w-20 h-20 bg-blue-600 hover:bg-blue-700 rounded-full border-4 border-white flex items-center justify-center text-white font-bold text-xl cursor-pointer transition-all hover:scale-110 active:scale-95"
-                   onClick={() => placeBet(10)}>
-                $10
-              </div>
-              <div className="w-20 h-20 bg-green-600 hover:bg-green-700 rounded-full border-4 border-white flex items-center justify-center text-white font-bold text-xl cursor-pointer transition-all hover:scale-110 active:scale-95"
-                   onClick={() => placeBet(25)}>
-                $25
-              </div>
-              <div className="w-20 h-20 bg-purple-600 hover:bg-purple-700 rounded-full border-4 border-white flex items-center justify-center text-white font-bold text-xl cursor-pointer transition-all hover:scale-110 active:scale-95"
-                   onClick={() => placeBet(50)}>
-                $50
-              </div>
-              <div className="w-20 h-20 bg-gray-900 hover:bg-gray-800 rounded-full border-4 border-yellow-500 flex items-center justify-center text-yellow-500 font-bold text-xl cursor-pointer transition-all hover:scale-110 active:scale-95"
-                   onClick={() => placeBet(100)}>
-                $100
-              </div>
-            </div>
-
-            <div className="bg-gray-900 p-8 rounded-2xl border-4 border-yellow-500 inline-block mb-6 min-w-[300px]">
-              <div className="text-yellow-500 text-6xl font-bold mb-2">${currentBet}</div>
-              <div className="text-gray-400">Sua Aposta</div>
-            </div>
-
-            {!betConfirmed ? (
-              <div className="flex gap-4 justify-center">
-                <button
-                  onClick={clearBet}
-                  className="px-10 py-4 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg text-xl transition-all"
-                >
-                  LIMPAR
-                </button>
-                <button
-                  onClick={confirmBet}
-                  className="px-10 py-4 bg-green-600 hover:bg-green-700 text-white font-bold rounded-lg text-xl transition-all"
-                >
-                  CONFIRMAR
-                </button>
-              </div>
-            ) : (
-              <div className="text-green-500 text-2xl font-bold">✅ Aposta Confirmada!</div>
-            )}
-          </div>
-        )}
-
-        {/* PLAYING / FINISHED */}
-        {(gameStatus === 'playing' || gameStatus === 'finished') && (
-          <div>
-            {/* Dealer */}
-            <div className="text-center mb-12">
-              <div className="text-yellow-500 text-2xl font-bold mb-4">🎩 DEALER</div>
-              <div className="flex gap-2 justify-center mb-4">
-                {dealerCards.map((card, i) => renderCard(card, i))}
-              </div>
-              {gameStatus === 'finished' && (
-                <div className="text-white text-xl font-bold">Total: {dealerTotal}</div>
-              )}
-            </div>
-
-            {/* Player */}
-            <div className="bg-gray-900 p-6 rounded-2xl border-4 border-yellow-500 max-w-2xl mx-auto">
-              <div className="flex justify-between items-center mb-4">
-                <span className="text-white text-xl font-bold">{playerName}</span>
-                <span className="text-yellow-500 text-xl font-bold">${balance}</span>
-              </div>
-              <div className="flex gap-2 justify-center mb-4">
-                {playerCards.map((card, i) => renderCard(card, i))}
-              </div>
-              <div className="text-center">
-                <div className="text-white text-2xl font-bold mb-2">Total: {playerTotal}</div>
-                {gameResult && (
-                  <div className="text-2xl font-bold mt-4">{gameResult}</div>
-                )}
-              </div>
-            </div>
-
-            {/* Action Buttons */}
-            {isPlayerTurn && gameStatus === 'playing' && (
-              <div className="flex gap-4 justify-center mt-8">
-                <button
-                  onClick={hit}
-                  className="px-10 py-4 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg text-xl transition-all"
-                >
-                  🃏 PEDIR
-                </button>
-                <button
-                  onClick={stand}
-                  className="px-10 py-4 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-lg text-xl transition-all"
-                >
-                  ✋ PARAR
-                </button>
-              </div>
-            )}
-
-            {gameStatus === 'finished' && (
-              <div className="text-center mt-8">
-                <button
-                  onClick={newRound}
-                  className="px-12 py-6 bg-green-600 hover:bg-green-700 text-white font-bold rounded-lg text-2xl transition-all flex items-center gap-3 mx-auto"
-                >
-                  <RefreshCw size={28} /> PRÓXIMA RODADA
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Bottom Stats */}
-      <div className="fixed bottom-0 left-0 right-0 bg-gradient-to-r from-amber-900 to-amber-800 border-t-4 border-yellow-500 p-6">
-        <div className="container mx-auto flex justify-around">
-          <div className="text-center">
-            <div className="text-yellow-500 text-xs font-bold mb-1">BALANCE</div>
-            <div className="text-white text-3xl font-bold">${balance.toFixed(2)}</div>
-          </div>
-          <div className="text-center">
-            <div className="text-yellow-500 text-xs font-bold mb-1">TOTAL BET</div>
-            <div className="text-white text-3xl font-bold">${currentBet.toFixed(2)}</div>
-          </div>
-          <div className="text-center">
-            <div className="text-yellow-500 text-xs font-bold mb-1">TOTAL WIN</div>
-            <div className="text-white text-3xl font-bold">$0.00</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+server.listen(PORT, () => {
+  console.log(`🎰 Servidor rodando na porta ${PORT}`);
+  console.log(`💾 Banco de dados: database.json`);
+});
